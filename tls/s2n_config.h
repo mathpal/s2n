@@ -66,10 +66,11 @@ struct s2n_config {
     /* if this is FALSE, server will ignore client's Maximum Fragment Length request */
     unsigned accept_mfl : 1;
     unsigned check_ocsp : 1;
+    unsigned disable_x509_time_validation : 1;
     unsigned disable_x509_validation : 1;
     unsigned max_verify_cert_chain_depth_set : 1;
     /* Whether to add dss cert type during a server certificate request.
-     * See https://github.com/aws/s2n-tls/blob/main/docs/USAGE-GUIDE.md */
+     * See s2n_config_enable_cert_req_dss_legacy_compat. */
     unsigned cert_req_dss_legacy_compat_enabled : 1;
     /* Whether any RSA certificates have been configured server-side to send to clients. This is needed so that the
      * server knows whether or not to self-downgrade to TLS 1.2 if the server is compiled with Openssl 1.0.2 and does
@@ -90,7 +91,7 @@ struct s2n_config {
 
     /* Indicates s2n_recv should read as much as it can into the output buffer
      *
-     * Note: This defaults to false to ensure backwards compatability with
+     * Note: This defaults to false to ensure backwards compatibility with
      * applications which relied on s2n_recv returning a single record.
      */
     unsigned recv_multi_record : 1;
@@ -100,6 +101,9 @@ struct s2n_config {
 
     /* Indicates whether s2n has enabled OCSP status requests, for backwards compatibility */
     unsigned ocsp_status_requested_by_s2n : 1;
+
+    /* TLS1.3 can be dangerous with kTLS. Require it to be explicitly enabled. */
+    unsigned ktls_tls13_enabled : 1;
 
     struct s2n_dh_params *dhparams;
     /* Needed until we can deprecate s2n_config_add_cert_chain_and_key. This is
@@ -140,17 +144,30 @@ struct s2n_config {
 
     s2n_ct_support_level ct_type;
 
+    /* Track whether the application has overriden the default client auth type.
+     * Clients and servers have different default client auth behavior, and this
+     * config could apply to either.
+     * This should be a bitflag, but that change is blocked on the SAW proofs.
+     */
+    uint8_t client_cert_auth_type_overridden;
+
+    /* Whether or not the client should authenticate itself to the server.
+     * Only used if client_cert_auth_type_overridden is true.
+     */
     s2n_cert_auth_type client_cert_auth_type;
 
     s2n_alert_behavior alert_behavior;
 
     /* Return TRUE if the host should be trusted, If FALSE this will likely be called again for every host/alternative name
      * in the certificate. If any respond TRUE. If none return TRUE, the cert will be considered untrusted. */
-    uint8_t (*verify_host)(const char *host_name, size_t host_name_len, void *data);
+    s2n_verify_host_fn verify_host_fn;
     void *data_for_verify_host;
 
     s2n_crl_lookup_callback crl_lookup_cb;
     void *crl_lookup_ctx;
+
+    s2n_cert_validation_callback cert_validation_cb;
+    void *cert_validation_ctx;
 
     /* Application supplied callback to resolve domain name conflicts when loading certs. */
     s2n_cert_tiebreak_callback cert_tiebreak_cb;
@@ -191,11 +208,32 @@ struct s2n_config {
 
     void *renegotiate_request_ctx;
     s2n_renegotiate_request_cb renegotiate_request_cb;
+
+    /* This version is meant as a safeguard against future TLS features which might affect the connection
+     * serialization feature.
+     *
+     * For example, suppose that a new TLS parameter is released which affects how data is sent
+     * post-handshake. This parameter must be available in both the s2n-tls version that serializes the 
+     * connection, as well as the version that deserializes the connection. If not, the serializer
+     * may negotiate this feature with its peer, which would cause an older deserializer to run into errors
+     * sending data to the peer.
+     * 
+     * This kind of version-mismatch can happen during deployments and rollbacks, and therefore we require
+     * the user to tell us which serialized version they support pre-handshake. 
+     * We will not negotiate a new feature until the user requests the serialized connection
+     * version the feature is tied to (i.e. the request indicates they have finished deploying
+     * the new feature to their entire fleet.)
+     */
+    s2n_serialization_version serialized_connection_version;
+
+    /* List of certificate authorities supported */
+    struct s2n_blob cert_authorities;
 };
 
 S2N_CLEANUP_RESULT s2n_config_ptr_free(struct s2n_config **config);
 
 int s2n_config_defaults_init(void);
+S2N_RESULT s2n_config_testing_defaults_init_tls13_certs(void);
 struct s2n_config *s2n_fetch_default_config(void);
 int s2n_config_set_unsafe_for_testing(struct s2n_config *config);
 
@@ -204,5 +242,10 @@ int s2n_config_free_session_ticket_keys(struct s2n_config *config);
 
 void s2n_wipe_static_configs(void);
 struct s2n_cert_chain_and_key *s2n_config_get_single_default_cert(struct s2n_config *config);
-int s2n_config_get_num_default_certs(struct s2n_config *config);
+int s2n_config_get_num_default_certs(const struct s2n_config *config);
 S2N_RESULT s2n_config_wall_clock(struct s2n_config *config, uint64_t *output);
+
+/* Validate that the certificates in `config` respect the certificate preferences
+ * in `security_policy` */
+S2N_RESULT s2n_config_validate_loaded_certificates(const struct s2n_config *config,
+        const struct s2n_security_policy *security_policy);

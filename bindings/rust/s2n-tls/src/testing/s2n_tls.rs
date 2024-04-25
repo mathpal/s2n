@@ -28,10 +28,18 @@ impl Harness {
             handshake_done: false,
         }
     }
+
+    pub fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
 }
 
 impl super::Connection for Harness {
-    fn poll<Ctx: Context>(&mut self, context: &mut Ctx) -> Poll<Result<()>> {
+    fn poll_negotiate<Ctx: Context>(&mut self, context: &mut Ctx) -> Poll<Result<()>> {
         let mut callback: Callback<Ctx> = Callback {
             context,
             err: None,
@@ -55,6 +63,33 @@ impl super::Connection for Harness {
                 }
                 Ok(()).into()
             }
+            Poll::Ready(Err(err)) => Err(err.into()).into(),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn poll_action<Ctx: Context, F>(&mut self, context: &mut Ctx, action: F) -> Poll<Result<()>>
+    where
+        F: FnOnce(&mut Connection) -> Poll<Result<usize, crate::error::Error>>,
+    {
+        let mut callback: Callback<Ctx> = Callback {
+            context,
+            err: None,
+            send_buffer: &mut self.send_buffer,
+        };
+
+        unsafe {
+            // Safety: the callback struct must live as long as the callbacks are
+            // set on on the connection
+            callback.set(&mut self.connection);
+        }
+
+        let result = action(&mut self.connection);
+
+        callback.unset(&mut self.connection)?;
+
+        match result {
+            Poll::Ready(Ok(_)) => Ok(()).into(),
             Poll::Ready(Err(err)) => Err(err.into()).into(),
             Poll::Pending => Poll::Pending,
         }
@@ -171,7 +206,7 @@ impl<'a, T: 'a + Context> Callback<'a, T> {
         let data = core::slice::from_raw_parts_mut(data, len as _);
         match context.on_read(data) {
             0 => {
-                // https://github.com/awslabs/s2n/blob/main/docs/USAGE-GUIDE.md#s2n_connection_set_send_cb
+                // https://aws.github.io/s2n-tls/doxygen/s2n_8h.html#a699fd9e05a8e8163811db6cab01af973
                 // s2n-tls wants us to set the global errno to signal blocked
                 errno::set_errno(errno::Errno(libc::EWOULDBLOCK));
                 -1
@@ -198,24 +233,26 @@ impl<'a, T: 'a + Context> Callback<'a, T> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        callbacks::{ClientHelloCallback, ConnectionFuture, VerifyHostNameCallback},
+        callbacks::{ClientHelloCallback, ConnectionFuture},
+        enums::ClientAuthType,
+        error::ErrorType,
         testing::{client_hello::*, s2n_tls::*, *},
     };
     use alloc::sync::Arc;
     use core::sync::atomic::Ordering;
-    use futures_test::task::new_count_waker;
+    use futures_test::task::{new_count_waker, noop_waker};
     use std::{fs, path::Path, pin::Pin, sync::atomic::AtomicUsize};
 
     #[test]
     fn handshake_default() {
         let config = build_config(&security::DEFAULT).unwrap();
-        s2n_tls_pair(config);
+        establish_connection(config);
     }
 
     #[test]
     fn handshake_default_tls13() {
         let config = build_config(&security::DEFAULT_TLS13).unwrap();
-        s2n_tls_pair(config)
+        establish_connection(config)
     }
 
     #[test]
@@ -300,10 +337,9 @@ mod tests {
     #[test]
     fn failing_client_hello_callback_sync() -> Result<(), Error> {
         let (waker, wake_count) = new_count_waker();
-        let handle = FailingCHHandler::default();
         let config = {
             let mut config = config_builder(&security::DEFAULT_TLS13)?;
-            config.set_client_hello_callback(handle)?;
+            config.set_client_hello_callback(FailingCHHandler)?;
             config.build()?
         };
 
@@ -322,7 +358,7 @@ mod tests {
             Harness::new(client)
         };
 
-        let mut pair = Pair::new(server, client, SAMPLES);
+        let mut pair = Pair::new(server, client);
         loop {
             match pair.poll() {
                 Poll::Ready(result) => {
@@ -350,10 +386,9 @@ mod tests {
     #[test]
     fn failing_client_hello_callback_async() -> Result<(), Error> {
         let (waker, wake_count) = new_count_waker();
-        let handle = FailingAsyncCHHandler::default();
         let config = {
             let mut config = config_builder(&security::DEFAULT_TLS13)?;
-            config.set_client_hello_callback(handle)?;
+            config.set_client_hello_callback(FailingAsyncCHHandler)?;
             config.build()?
         };
 
@@ -372,7 +407,7 @@ mod tests {
             Harness::new(client)
         };
 
-        let mut pair = Pair::new(server, client, SAMPLES);
+        let mut pair = Pair::new(server, client);
         loop {
             match pair.poll() {
                 Poll::Ready(result) => {
@@ -426,7 +461,7 @@ mod tests {
             Harness::new(client)
         };
 
-        let pair = Pair::new(server, client, SAMPLES);
+        let pair = Pair::new(server, client);
 
         poll_tls_pair(pair);
         // confirm that the callback returned Pending `require_pending_count` times
@@ -495,7 +530,7 @@ mod tests {
             Harness::new(client)
         };
 
-        let pair = Pair::new(server, client, SAMPLES);
+        let pair = Pair::new(server, client);
 
         assert_eq!(callback.count(), 0);
         poll_tls_pair(pair);
@@ -515,13 +550,6 @@ mod tests {
 
     #[test]
     fn trust_location() -> Result<(), Error> {
-        struct AcceptAllHostnames {}
-        impl VerifyHostNameCallback for AcceptAllHostnames {
-            fn verify_host_name(&self, _: &str) -> bool {
-                true
-            }
-        }
-
         let pem_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../tests/pems"));
         let mut cert = pem_dir.to_path_buf();
         cert.push("rsa_4096_sha512_client_cert.pem");
@@ -530,11 +558,92 @@ mod tests {
 
         let mut builder = crate::config::Builder::new();
         builder.set_security_policy(&security::DEFAULT_TLS13)?;
-        builder.set_verify_host_callback(AcceptAllHostnames {})?;
+        builder.set_verify_host_callback(InsecureAcceptAllCertificatesHandler {})?;
         builder.load_pem(&fs::read(&cert)?, &fs::read(&key)?)?;
         builder.trust_location(Some(&cert), None)?;
 
-        s2n_tls_pair(builder.build()?);
+        establish_connection(builder.build()?);
+        Ok(())
+    }
+
+    /// `trust_location()` calls `s2n_config_set_verification_ca_location()`, which has the legacy behavior
+    /// of enabling OCSP on clients. Since we do not want to replicate that behavior in the Rust bindings,
+    /// this test verifies that `trust_location()` does not turn on OCSP. It also verifies that turning
+    /// on OCSP explicitly still works when `trust_location()` is called.
+    #[test]
+    fn trust_location_does_not_change_ocsp_status() -> Result<(), Error> {
+        let pem_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../tests/pems"));
+        let mut cert = pem_dir.to_path_buf();
+        cert.push("rsa_4096_sha512_client_cert.pem");
+        let mut key = pem_dir.to_path_buf();
+        key.push("rsa_4096_sha512_client_key.pem");
+
+        const OCSP_IANA_EXTENSION_ID: u16 = 5;
+
+        for enable_ocsp in [true, false] {
+            let config = {
+                let mut config = crate::config::Builder::new();
+
+                if enable_ocsp {
+                    config.enable_ocsp()?;
+                }
+
+                config.set_security_policy(&security::DEFAULT_TLS13)?;
+                config.set_verify_host_callback(InsecureAcceptAllCertificatesHandler {})?;
+                config.set_client_hello_callback(HasExtensionClientHelloHandler {
+                    // This client hello handler will check for the OCSP extension
+                    extension_iana: OCSP_IANA_EXTENSION_ID,
+                    extension_expected: enable_ocsp,
+                })?;
+                config.load_pem(&fs::read(&cert)?, &fs::read(&key)?)?;
+                config.trust_location(Some(&cert), None)?;
+                config.build()?
+            };
+
+            let mut pair = tls_pair(config);
+            pair.server
+                .0
+                .connection_mut()
+                .set_waker(Some(&noop_waker()))?;
+
+            poll_tls_pair(pair);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn connection_level_verify_host_callback() -> Result<(), Error> {
+        let reject_config = {
+            let keypair = CertKeyPair::default();
+            let mut config = crate::config::Builder::new();
+            // configure the config VerifyHostNameCallback to reject all certificates
+            config.set_verify_host_callback(RejectAllCertificatesHandler {})?;
+            config.set_security_policy(&security::DEFAULT_TLS13)?;
+            config.load_pem(keypair.cert(), keypair.key())?;
+            config.trust_pem(keypair.cert())?;
+            config.set_client_auth_type(ClientAuthType::Required)?;
+            config.build()?
+        };
+
+        // confirm that default connection establishment fails
+        let mut pair = tls_pair(reject_config.clone());
+        assert!(poll_tls_pair_result(&mut pair).is_err());
+
+        // confirm that overriding the verify_host_callback on connection causes
+        // the handshake to succeed
+        pair = tls_pair(reject_config);
+        pair.server
+            .0
+            .connection
+            .set_verify_host_callback(InsecureAcceptAllCertificatesHandler {})
+            .unwrap();
+        pair.client
+            .0
+            .connection
+            .set_verify_host_callback(InsecureAcceptAllCertificatesHandler {})
+            .unwrap();
+        assert!(poll_tls_pair_result(&mut pair).is_ok());
+
         Ok(())
     }
 
@@ -560,7 +669,7 @@ mod tests {
             Harness::new(client)
         };
 
-        let pair = Pair::new(server, client, SAMPLES);
+        let pair = Pair::new(server, client);
         let pair = poll_tls_pair(pair);
         let server = pair.server.0.connection;
         let client = pair.client.0.connection;
@@ -600,7 +709,7 @@ mod tests {
             Harness::new(client)
         };
 
-        let pair = Pair::new(server, client, SAMPLES);
+        let pair = Pair::new(server, client);
         let pair = poll_tls_pair(pair);
         let server = pair.server.0.connection;
         let client = pair.client.0.connection;
@@ -616,6 +725,239 @@ mod tests {
             let hash_alg = conn.selected_client_hash_algorithm()?;
             assert!(hash_alg.is_some());
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn system_certs_loaded_by_default() {
+        let keypair = CertKeyPair::default();
+
+        // Load the server certificate into the trust store by overriding the OpenSSL default
+        // certificate location.
+        temp_env::with_var("SSL_CERT_FILE", Some(keypair.cert_path()), || {
+            let mut builder = Builder::new();
+            builder
+                .load_pem(keypair.cert(), keypair.key())
+                .unwrap()
+                .set_security_policy(&security::DEFAULT_TLS13)
+                .unwrap()
+                .set_verify_host_callback(InsecureAcceptAllCertificatesHandler {})
+                .unwrap();
+
+            let config = builder.build().unwrap();
+            establish_connection(config);
+        });
+    }
+
+    #[test]
+    fn disable_loading_system_certs() {
+        let keypair = CertKeyPair::default();
+
+        // Load the server certificate into the trust store by overriding the OpenSSL default
+        // certificate location.
+        temp_env::with_var("SSL_CERT_FILE", Some(keypair.cert_path()), || {
+            // Test the Builder itself, and also the Builder produced by the Config builder() API.
+            for mut builder in [Builder::new(), Config::builder()] {
+                builder
+                    .load_pem(keypair.cert(), keypair.key())
+                    .unwrap()
+                    .set_security_policy(&security::DEFAULT_TLS13)
+                    .unwrap()
+                    .set_verify_host_callback(InsecureAcceptAllCertificatesHandler {})
+                    .unwrap();
+
+                // Disable loading system certificates
+                builder.with_system_certs(false).unwrap();
+
+                let config = builder.build().unwrap();
+                let mut config_with_system_certs = config.clone();
+
+                let mut pair = tls_pair(config);
+
+                // System certificates should not be loaded into the trust store. The handshake
+                // should fail since the certificate should not be trusted.
+                assert!(poll_tls_pair_result(&mut pair).is_err());
+
+                // The handshake should succeed after trusting the certificate.
+                unsafe {
+                    s2n_tls_sys::s2n_config_load_system_certs(
+                        config_with_system_certs.as_mut_ptr(),
+                    );
+                }
+                establish_connection(config_with_system_certs);
+            }
+        });
+    }
+
+    #[test]
+    fn peer_chain() -> Result<(), Error> {
+        use crate::enums::ClientAuthType;
+
+        let config = {
+            let mut config = config_builder(&security::DEFAULT_TLS13)?;
+            config.set_client_auth_type(ClientAuthType::Optional)?;
+            config.build()?
+        };
+
+        let server = {
+            let mut server = crate::connection::Connection::new_server();
+            server.set_config(config.clone())?;
+            Harness::new(server)
+        };
+
+        let client = {
+            let mut client = crate::connection::Connection::new_client();
+            client.set_config(config)?;
+            Harness::new(client)
+        };
+
+        let pair = Pair::new(server, client);
+        let pair = poll_tls_pair(pair);
+        let server = pair.server.0.connection;
+        let client = pair.client.0.connection;
+
+        for conn in [server, client] {
+            let chain = conn.peer_cert_chain()?;
+            assert_eq!(chain.len(), 1);
+            for cert in chain.iter() {
+                let cert = cert?;
+                let cert = cert.der()?;
+                assert!(!cert.is_empty());
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn selected_cert() -> Result<(), Error> {
+        use crate::enums::ClientAuthType;
+
+        let config = {
+            let mut config = config_builder(&security::DEFAULT_TLS13)?;
+            config.set_client_auth_type(ClientAuthType::Required)?;
+            config.build()?
+        };
+
+        let server = {
+            let mut server = crate::connection::Connection::new_server();
+            server.set_config(config.clone())?;
+            Harness::new(server)
+        };
+
+        let client = {
+            let mut client = crate::connection::Connection::new_client();
+            client.set_config(config)?;
+            Harness::new(client)
+        };
+
+        // None before handshake...
+        assert!(server.connection.selected_cert().is_none());
+        assert!(client.connection.selected_cert().is_none());
+
+        let pair = Pair::new(server, client);
+
+        let pair = poll_tls_pair(pair);
+        let server = pair.server.0.connection;
+        let client = pair.client.0.connection;
+
+        for conn in [&server, &client] {
+            let chain = conn.selected_cert().unwrap();
+            assert_eq!(chain.len(), 1);
+            for cert in chain.iter() {
+                let cert = cert?;
+                let cert = cert.der()?;
+                assert!(!cert.is_empty());
+            }
+        }
+
+        // Same config is used for both and we are doing mTLS, so both should select the same
+        // certificate.
+        assert_eq!(
+            server
+                .selected_cert()
+                .unwrap()
+                .iter()
+                .next()
+                .unwrap()?
+                .der()?,
+            client
+                .selected_cert()
+                .unwrap()
+                .iter()
+                .next()
+                .unwrap()?
+                .der()?
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn master_secret_success() -> Result<(), Error> {
+        let policy = security::Policy::from_version("test_all_tls12")?;
+        let config = config_builder(&policy)?.build()?;
+        let pair = poll_tls_pair(tls_pair(config));
+        let server = pair.server.0.connection;
+        let client = pair.client.0.connection;
+
+        let server_secret = server.master_secret()?;
+        let client_secret = client.master_secret()?;
+        assert_eq!(server_secret, client_secret);
+
+        Ok(())
+    }
+
+    #[test]
+    fn master_secret_failure() -> Result<(), Error> {
+        // TLS1.3 does not support getting the master secret
+        let config = config_builder(&security::DEFAULT_TLS13)?.build()?;
+        let pair = poll_tls_pair(tls_pair(config));
+        let server = pair.server.0.connection;
+        let client = pair.client.0.connection;
+
+        let server_error = server.master_secret().unwrap_err();
+        assert_eq!(server_error.kind(), ErrorType::UsageError);
+
+        let client_error = client.master_secret().unwrap_err();
+        assert_eq!(client_error.kind(), ErrorType::UsageError);
+
+        Ok(())
+    }
+
+    #[cfg(feature = "unstable-ktls")]
+    #[test]
+    fn key_updates() -> Result<(), Error> {
+        use crate::{connection::KeyUpdateCount, enums::PeerKeyUpdate};
+
+        let empty_key_updates = KeyUpdateCount {
+            recv_key_updates: 0,
+            send_key_updates: 0,
+        };
+
+        let pair = tls_pair(build_config(&security::DEFAULT_TLS13)?);
+        let mut pair = poll_tls_pair(pair);
+
+        // there haven't been any key updates at the start of the connection
+        let client_updates = pair.client.0.connection.as_ref().key_update_counts()?;
+        assert_eq!(client_updates, empty_key_updates);
+        let server_updates = pair.server.0.connection.as_ref().key_update_counts()?;
+        assert_eq!(server_updates, empty_key_updates);
+
+        pair.server
+            .0
+            .connection
+            .as_mut()
+            .request_key_update(PeerKeyUpdate::KeyUpdateNotRequested)?;
+        assert!(pair.poll_send(Mode::Server, &[0]).is_ready());
+
+        // the server send key has been updated
+        let client_updates = pair.client.0.connection.as_ref().key_update_counts()?;
+        assert_eq!(client_updates, empty_key_updates);
+        let server_updates = pair.server.0.connection.as_ref().key_update_counts()?;
+        assert_eq!(server_updates.recv_key_updates, 0);
+        assert_eq!(server_updates.send_key_updates, 1);
 
         Ok(())
     }

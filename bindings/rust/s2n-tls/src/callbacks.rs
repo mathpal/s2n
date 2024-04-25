@@ -32,6 +32,9 @@ pub use async_cb::*;
 mod client_hello;
 pub use client_hello::*;
 
+mod session_ticket;
+pub use session_ticket::*;
+
 mod pkey;
 pub use pkey::*;
 
@@ -64,16 +67,36 @@ where
 ///
 /// The implementation should verify the certificate host name and return `true`
 /// if the name is valid, `false` otherwise.
-pub trait VerifyHostNameCallback {
+pub trait VerifyHostNameCallback: 'static + Send + Sync {
     fn verify_host_name(&self, host_name: &str) -> bool;
 }
 
 /// A trait for the callback used to retrieve the system / wall clock time.
-pub trait WallClock {
+pub trait WallClock: 'static + Send + Sync {
     fn get_time_since_epoch(&self) -> Duration;
 }
 
 /// A trait for the callback used to retrieve the monotonic time.
-pub trait MonotonicClock {
+pub trait MonotonicClock: 'static + Send + Sync {
     fn get_time(&self) -> Duration;
+}
+
+/// Invoke the user provided VerifyHostNameCallback on the host_name.
+///
+/// # Safety
+///
+/// The caller must ensure that the memory underlying host_name is a valid
+/// slice.
+pub(crate) unsafe fn verify_host(
+    host_name: *const ::libc::c_char,
+    host_name_len: usize,
+    handler: &mut Box<dyn VerifyHostNameCallback>,
+) -> u8 {
+    let host_name = host_name as *const u8;
+    let host_name = core::slice::from_raw_parts(host_name, host_name_len);
+
+    match core::str::from_utf8(host_name) {
+        Ok(host_name_str) => handler.verify_host_name(host_name_str) as u8,
+        Err(_) => 0, // If the host name can't be parsed, fail closed.
+    }
 }

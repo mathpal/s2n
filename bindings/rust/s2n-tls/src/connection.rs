@@ -5,11 +5,13 @@
 
 use crate::{
     callbacks::*,
+    cert_chain::CertificateChain,
     config::Config,
     enums::*,
     error::{Error, Fallible, Pollable},
     security,
 };
+
 use core::{
     convert::TryInto,
     fmt,
@@ -34,6 +36,15 @@ macro_rules! static_const_str {
     };
 }
 
+#[non_exhaustive]
+#[derive(Debug, PartialEq)]
+/// s2n-tls only tracks up to u8::MAX (255) key updates. If any of the fields show
+/// 255 updates, then more than 255 updates may have occurred.
+pub struct KeyUpdateCount {
+    pub send_key_updates: u8,
+    pub recv_key_updates: u8,
+}
+
 pub struct Connection {
     connection: NonNull<s2n_connection>,
 }
@@ -50,6 +61,9 @@ impl fmt::Debug for Connection {
         if let Ok(version) = self.actual_protocol_version() {
             debug.field("actual_protocol_version", &version);
         }
+        if let Ok(curve) = self.selected_curve() {
+            debug.field("selected_curve", &curve);
+        }
         debug.finish_non_exhaustive()
     }
 }
@@ -59,13 +73,31 @@ impl fmt::Debug for Connection {
 /// s2n_connection objects can be sent across threads
 unsafe impl Send for Connection {}
 
-/// # Safety
+/// # Sync
 ///
-/// All C methods that mutate the s2n_connection are wrapped
-/// in Rust methods that require a mutable reference.
+/// Although NonNull isn't Sync and allows access to mutable pointers even from
+/// immutable references, the Connection interface enforces that all mutating
+/// methods correctly require &mut self.
+///
+/// Developers and reviewers MUST ensure that new methods correctly use
+/// either &self or &mut self depending on their behavior. No mechanism enforces this.
+///
+/// Note: Although non-mutating methods like getters should be thread-safe by definition,
+/// technically the only thread safety guarantee provided by the underlying C library
+/// is that s2n_send and s2n_recv can be called concurrently.
+///
 unsafe impl Sync for Connection {}
 
 impl Connection {
+    /// # Warning
+    ///
+    /// The newly created connection uses the default security policy.
+    /// Consider changing this depending on your security and compatibility requirements
+    /// by calling [`Connection::set_security_policy`].
+    /// Alternatively, you can use [`crate::config::Builder`], [`crate::config::Builder::set_security_policy`],
+    /// and [`Connection::set_config`] to set the policy on the Config instead of on the Connection.
+    /// See the s2n-tls usage guide:
+    /// <https://aws.github.io/s2n-tls/usage-guide/ch06-security-policies.html>
     pub fn new(mode: Mode) -> Self {
         crate::init::init();
 
@@ -253,6 +285,46 @@ impl Connection {
         Ok(self)
     }
 
+    /// Signals the connection to do a key_update at the next possible opportunity.
+    /// Note that the resulting key update message will not be sent until `send` is
+    /// called on the connection.
+    ///
+    /// `peer_request` indicates if a key update should also be requested
+    /// of the peer. When set to `KeyUpdateNotRequested`, then only the sending
+    /// key of the connection will be updated. If set to `KeyUpdateRequested`, then
+    /// the sending key of conn will be updated AND the peer will be requested to
+    /// update their sending key. Note that s2n-tls currently only supports
+    /// `peer_request` being set to `KeyUpdateNotRequested` and will return an error
+    /// if any other value is used.
+    pub fn request_key_update(&mut self, peer_request: PeerKeyUpdate) -> Result<&mut Self, Error> {
+        unsafe {
+            s2n_connection_request_key_update(self.connection.as_ptr(), peer_request.into())
+                .into_result()
+        }?;
+        Ok(self)
+    }
+
+    /// Reports the number of times sending and receiving keys have been updated.
+    ///
+    /// This only applies to TLS1.3. Earlier versions do not support key updates.
+    #[cfg(feature = "unstable-ktls")]
+    pub fn key_update_counts(&self) -> Result<KeyUpdateCount, Error> {
+        let mut send_key_updates = 0;
+        let mut recv_key_updates = 0;
+        unsafe {
+            s2n_connection_get_key_update_counts(
+                self.connection.as_ptr(),
+                &mut send_key_updates,
+                &mut recv_key_updates,
+            )
+            .into_result()?;
+        }
+        Ok(KeyUpdateCount {
+            send_key_updates,
+            recv_key_updates,
+        })
+    }
+
     /// sets the application protocol preferences on an s2n_connection object.
     ///
     /// protocols is a list in order of preference, with most preferred protocol first, and of
@@ -312,6 +384,40 @@ impl Connection {
     /// may be used to receive data with callbacks defined by the user.
     pub fn set_send_callback(&mut self, callback: s2n_send_fn) -> Result<&mut Self, Error> {
         unsafe { s2n_connection_set_send_cb(self.connection.as_ptr(), callback).into_result() }?;
+        Ok(self)
+    }
+
+    /// Sets the callback to use for verifying that a hostname from an X.509 certificate is
+    /// trusted.
+    ///
+    /// The callback may be called more than once during certificate validation as each SAN on
+    /// the certificate will be checked.
+    ///
+    /// Corresponds to the underlying C API
+    /// [s2n_connection_set_verify_host_callback](https://aws.github.io/s2n-tls/doxygen/s2n_8h.html).
+    pub fn set_verify_host_callback<T: 'static + VerifyHostNameCallback>(
+        &mut self,
+        handler: T,
+    ) -> Result<&mut Self, Error> {
+        unsafe extern "C" fn verify_host_cb_fn(
+            host_name: *const ::libc::c_char,
+            host_name_len: usize,
+            context: *mut ::libc::c_void,
+        ) -> u8 {
+            let context = &mut *(context as *mut Context);
+            let handler = context.verify_host_callback.as_mut().unwrap();
+            verify_host(host_name, host_name_len, handler)
+        }
+
+        self.context_mut().verify_host_callback = Some(Box::new(handler));
+        unsafe {
+            s2n_connection_set_verify_host_callback(
+                self.connection.as_ptr(),
+                Some(verify_host_cb_fn),
+                self.context_mut() as *mut Context as *mut c_void,
+            )
+            .into_result()
+        }?;
         Ok(self)
     }
 
@@ -382,6 +488,14 @@ impl Connection {
     /// any other callbacks) until the blocking async task reports completion.
     pub fn poll_negotiate(&mut self) -> Poll<Result<&mut Self, Error>> {
         let mut blocked = s2n_blocked_status::NOT_BLOCKED;
+        if !core::mem::replace(&mut self.context_mut().connection_initialized, true) {
+            if let Some(config) = self.config() {
+                if let Some(callback) = config.context().connection_initializer.as_ref() {
+                    let future = callback.initialize_connection(self);
+                    AsyncCallback::trigger(future, self);
+                }
+            }
+        }
 
         loop {
             // check if an async task exists and poll it to completion
@@ -403,7 +517,10 @@ impl Connection {
             let res = unsafe { s2n_negotiate(self.connection.as_ptr(), &mut blocked).into_poll() };
 
             match res {
-                Poll::Ready(res) => return Poll::Ready(res.map(|_| self)),
+                Poll::Ready(res) => {
+                    let res = res.map(|_| self);
+                    return Poll::Ready(res);
+                }
                 Poll::Pending => {
                     // if there is no connection_future then return, otherwise continue
                     // looping and polling the future
@@ -510,6 +627,22 @@ impl Connection {
         }
     }
 
+    /// Attempts a graceful shutdown of the write side of a TLS connection.
+    ///
+    /// Unlike Self::poll_shutdown, no reponse from the peer is necessary.
+    /// If using TLS1.3, the connection can continue to be used for reading afterwards.
+    pub fn poll_shutdown_send(&mut self) -> Poll<Result<&mut Self, Error>> {
+        if !self.remaining_blinding_delay()?.is_zero() {
+            return Poll::Pending;
+        }
+        let mut blocked = s2n_blocked_status::NOT_BLOCKED;
+        unsafe {
+            s2n_shutdown_send(self.connection.as_ptr(), &mut blocked)
+                .into_poll()
+                .map_ok(|_| self)
+        }
+    }
+
     /// Returns the TLS alert code, if any
     pub fn alert(&self) -> Option<u8> {
         let alert =
@@ -535,6 +668,15 @@ impl Connection {
                 Err(_) => None,
             }
         }
+    }
+
+    /// Adds a session ticket from a previous TLS connection to create a resumed session
+    pub fn set_session_ticket(&mut self, session: &[u8]) -> Result<&mut Self, Error> {
+        unsafe {
+            s2n_connection_set_session(self.connection.as_ptr(), session.as_ptr(), session.len())
+                .into_result()
+        }?;
+        Ok(self)
     }
 
     /// Sets a Waker on the connection context or clears it if `None` is passed.
@@ -637,6 +779,43 @@ impl Connection {
         unsafe { Ok(Some(std::slice::from_raw_parts(chain, len as usize))) }
     }
 
+    // The memory backing the ClientHello is owned by the Connection, so we
+    // tie the ClientHello to the lifetime of the Connection. This is validated
+    // with a doc test that ensures the ClientHello is invalid once the
+    // connection has gone out of scope.
+    //
+    /// Returns a reference to the ClientHello associated with the connection.
+    /// ```compile_fail
+    /// use s2n_tls::client_hello::ClientHello;
+    /// use s2n_tls::connection::Connection;
+    /// use s2n_tls::enums::Mode;
+    ///
+    /// let mut conn = Connection::new(Mode::Server);
+    /// let mut client_hello: &ClientHello = conn.client_hello().unwrap();
+    /// drop(conn);
+    /// client_hello.raw_message();
+    /// ```
+    ///
+    /// The compilation could be failing for a variety of reasons, so make sure
+    /// that the test case is actually good.
+    /// ```no_run
+    /// use s2n_tls::client_hello::ClientHello;
+    /// use s2n_tls::connection::Connection;
+    /// use s2n_tls::enums::Mode;
+    ///
+    /// let mut conn = Connection::new(Mode::Server);
+    /// let mut client_hello: &ClientHello = conn.client_hello().unwrap();
+    /// client_hello.raw_message();
+    /// drop(conn);
+    /// ```
+    pub fn client_hello(&self) -> Result<&crate::client_hello::ClientHello, Error> {
+        let mut handle =
+            unsafe { s2n_connection_get_client_hello(self.connection.as_ptr()).into_result()? };
+        Ok(crate::client_hello::ClientHello::from_ptr(unsafe {
+            handle.as_mut()
+        }))
+    }
+
     pub(crate) fn mark_client_hello_cb_done(&mut self) -> Result<(), Error> {
         unsafe {
             s2n_client_hello_cb_done(self.connection.as_ptr()).into_result()?;
@@ -665,6 +844,11 @@ impl Connection {
         // The strings returned by s2n_connection_get_cipher
         // are static and immutable since they are const fields on static const structs
         static_const_str!(cipher)
+    }
+
+    pub fn selected_curve(&self) -> Result<&str, Error> {
+        let curve = unsafe { s2n_connection_get_curve(self.connection.as_ptr()).into_result()? };
+        static_const_str!(curve)
     }
 
     pub fn selected_signature_algorithm(&self) -> Result<SignatureAlgorithm, Error> {
@@ -714,12 +898,133 @@ impl Connection {
             hash_alg => Some(hash_alg.try_into()?),
         })
     }
+
+    /// Provides access to the TLS-Exporter functionality.
+    ///
+    /// See https://datatracker.ietf.org/doc/html/rfc5705 and https://www.rfc-editor.org/rfc/rfc8446.
+    ///
+    /// This is currently only available with TLS 1.3 connections which have finished a handshake.
+    pub fn tls_exporter(
+        &self,
+        label: &[u8],
+        context: &[u8],
+        output: &mut [u8],
+    ) -> Result<(), Error> {
+        unsafe {
+            s2n_connection_tls_exporter(
+                self.connection.as_ptr(),
+                label.as_ptr(),
+                label.len().try_into().map_err(|_| Error::INVALID_INPUT)?,
+                context.as_ptr(),
+                context.len().try_into().map_err(|_| Error::INVALID_INPUT)?,
+                output.as_mut_ptr(),
+                output.len().try_into().map_err(|_| Error::INVALID_INPUT)?,
+            )
+            .into_result()
+            .map(|_| ())
+        }
+    }
+
+    /// Returns the validated peer certificate chain.
+    // 'static lifetime is because this copies the certificate chain from the connection into a new
+    // chain, so the lifetime is independent of the connection.
+    pub fn peer_cert_chain(&self) -> Result<CertificateChain<'static>, Error> {
+        unsafe {
+            let mut chain = CertificateChain::new()?;
+            s2n_connection_get_peer_cert_chain(
+                self.connection.as_ptr(),
+                chain.as_mut_ptr().as_ptr(),
+            )
+            .into_result()
+            .map(|_| ())?;
+            Ok(chain)
+        }
+    }
+
+    /// Get the certificate used during the TLS handshake
+    ///
+    /// - If `self` is a server connection, the certificate selected will depend on the
+    ///   ServerName sent by the client and supported ciphers.
+    /// - If `self` is a client connection, the certificate sent in response to a CertificateRequest
+    ///   message is returned. Currently s2n-tls supports loading only one certificate in client mode. Note that
+    ///   not all TLS endpoints will request a certificate.
+    pub fn selected_cert(&self) -> Option<CertificateChain<'_>> {
+        unsafe {
+            // The API only returns null, no error is actually set.
+            // Clippy doesn't realize from_ptr_reference is unsafe.
+            #[allow(clippy::manual_map)]
+            if let Some(ptr) =
+                NonNull::new(s2n_connection_get_selected_cert(self.connection.as_ptr()))
+            {
+                Some(CertificateChain::from_ptr_reference(ptr))
+            } else {
+                None
+            }
+        }
+    }
+
+    pub fn master_secret(&self) -> Result<Vec<u8>, Error> {
+        // TLS1.2 master secrets are always 48 bytes
+        let mut secret = vec![0; 48];
+        unsafe {
+            s2n_connection_get_master_secret(
+                self.connection.as_ptr(),
+                secret.as_mut_ptr(),
+                secret.len(),
+            )
+            .into_result()?;
+        }
+        Ok(secret)
+    }
+
+    /// Retrieves the size of the serialized connection
+    pub fn serialization_length(&self) -> Result<usize, Error> {
+        unsafe {
+            let mut length = 0;
+            s2n_connection_serialization_length(self.connection.as_ptr(), &mut length)
+                .into_result()?;
+            Ok(length.try_into().unwrap())
+        }
+    }
+
+    /// Serializes the TLS connection into the provided buffer
+    pub fn serialize(&self, output: &mut [u8]) -> Result<(), Error> {
+        unsafe {
+            s2n_connection_serialize(
+                self.connection.as_ptr(),
+                output.as_mut_ptr(),
+                output.len().try_into().map_err(|_| Error::INVALID_INPUT)?,
+            )
+            .into_result()?;
+            Ok(())
+        }
+    }
+
+    /// Deserializes the input buffer into a new TLS connection that can send/recv
+    /// data from the original peer.
+    pub fn deserialize(&mut self, input: &[u8]) -> Result<(), Error> {
+        let size = input.len();
+        /* This is not ideal, we know that s2n_connection_deserialize will not mutate the
+         * input value, however, the mut is needed to use the stuffer functions. */
+        let input = input.as_ptr() as *mut u8;
+        unsafe {
+            s2n_connection_deserialize(
+                self.as_ptr(),
+                input,
+                size.try_into().map_err(|_| Error::INVALID_INPUT)?,
+            )
+            .into_result()?;
+            Ok(())
+        }
+    }
 }
 
 struct Context {
     mode: Mode,
     waker: Option<Waker>,
     async_callback: Option<AsyncCallback>,
+    verify_host_callback: Option<Box<dyn VerifyHostNameCallback>>,
+    connection_initialized: bool,
 }
 
 impl Context {
@@ -728,6 +1033,8 @@ impl Context {
             mode,
             waker: None,
             async_callback: None,
+            verify_host_callback: None,
+            connection_initialized: false,
         }
     }
 }
@@ -778,6 +1085,20 @@ impl Connection {
             .into_result()?;
         Ok(self)
     }
+
+    pub fn quic_process_post_handshake_message(&mut self) -> Result<&mut Self, Error> {
+        let mut blocked = s2n_blocked_status::NOT_BLOCKED;
+        unsafe {
+            s2n_recv_quic_post_handshake_message(self.connection.as_ptr(), &mut blocked)
+                .into_result()
+        }?;
+        Ok(self)
+    }
+
+    /// Allows the quic library to check if session tickets are expected
+    pub fn are_session_tickets_enabled(&self) -> bool {
+        unsafe { s2n_connection_are_session_tickets_enabled(self.connection.as_ptr()) }
+    }
 }
 
 impl AsRef<Connection> for Connection {
@@ -808,5 +1129,24 @@ impl Drop for Connection {
             // cleanup connection
             let _ = s2n_connection_free(self.connection.as_ptr()).into_result();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ensure the connection context is send
+    #[test]
+    fn context_send_test() {
+        fn assert_send<T: 'static + Send>() {}
+        assert_send::<Context>();
+    }
+
+    // ensure the connection context is sync
+    #[test]
+    fn context_sync_test() {
+        fn assert_sync<T: 'static + Sync>() {}
+        assert_sync::<Context>();
     }
 }

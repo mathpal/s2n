@@ -43,7 +43,7 @@ int s2n_server_nst_recv(struct s2n_connection *conn)
 {
     POSIX_GUARD(s2n_stuffer_read_uint32(&conn->handshake.io, &conn->ticket_lifetime_hint));
 
-    uint16_t session_ticket_len;
+    uint16_t session_ticket_len = 0;
     POSIX_GUARD(s2n_stuffer_read_uint16(&conn->handshake.io, &session_ticket_len));
 
     if (session_ticket_len > 0) {
@@ -111,6 +111,7 @@ int s2n_server_nst_send(struct s2n_connection *conn)
 S2N_RESULT s2n_tls13_server_nst_send(struct s2n_connection *conn, s2n_blocked_status *blocked)
 {
     RESULT_ENSURE_REF(conn);
+    RESULT_ENSURE_GTE(conn->actual_protocol_version, S2N_TLS13);
 
     /* Usually tickets are sent immediately after the handshake.
      * If possible, reuse the handshake IO stuffer before it's wiped.
@@ -121,7 +122,15 @@ S2N_RESULT s2n_tls13_server_nst_send(struct s2n_connection *conn, s2n_blocked_st
      */
     struct s2n_stuffer *nst_stuffer = &conn->handshake.io;
 
-    if (conn->mode != S2N_SERVER || conn->actual_protocol_version < S2N_TLS13 || !conn->config->use_tickets) {
+    if (conn->mode != S2N_SERVER || !conn->config->use_tickets) {
+        return S2N_RESULT_OK;
+    }
+
+    /* Legacy behavior is that the s2n server sends a NST even if the client did not indicate support
+     * for resumption or does not support the psk_dhe_ke mode. This is potentially wasteful so we 
+     * choose to not extend this behavior to QUIC.
+     */
+    if (conn->quic_enabled && conn->psk_params.psk_ke_mode != S2N_PSK_DHE_KE) {
         return S2N_RESULT_OK;
     }
 
@@ -243,7 +252,7 @@ static int s2n_generate_session_secret(struct s2n_connection *conn, struct s2n_b
 
     s2n_tls13_connection_keys(secrets, conn);
     struct s2n_blob master_secret = { 0 };
-    POSIX_GUARD(s2n_blob_init(&master_secret, conn->secrets.tls13.resumption_master_secret, secrets.size));
+    POSIX_GUARD(s2n_blob_init(&master_secret, conn->secrets.version.tls13.resumption_master_secret, secrets.size));
     POSIX_GUARD(s2n_realloc(output, secrets.size));
     POSIX_GUARD_RESULT(s2n_tls13_derive_session_ticket_secret(&secrets, &master_secret, nonce, output));
 

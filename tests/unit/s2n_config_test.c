@@ -19,14 +19,22 @@
 
 #include "api/s2n.h"
 #include "crypto/s2n_fips.h"
+#include "crypto/s2n_pq.h"
 #include "s2n_test.h"
 #include "testlib/s2n_testlib.h"
+#include "tls/extensions/s2n_client_supported_groups.h"
 #include "tls/s2n_connection.h"
 #include "tls/s2n_internal.h"
 #include "tls/s2n_record.h"
 #include "tls/s2n_security_policies.h"
 #include "tls/s2n_tls13.h"
 #include "unstable/npn.h"
+#include "utils/s2n_map.h"
+
+#define S2N_TEST_MAX_SUPPORTED_GROUPS_COUNT 30
+
+/* forward declaration */
+int s2n_config_build_domain_name_to_cert_map(struct s2n_config *config, struct s2n_cert_chain_and_key *cert_key_pair);
 
 static int s2n_test_select_psk_identity_callback(struct s2n_connection *conn, void *context,
         struct s2n_offered_psk_list *psk_identity_list)
@@ -44,6 +52,11 @@ static int s2n_test_crl_lookup_cb(struct s2n_crl_lookup *lookup, void *context)
     return S2N_SUCCESS;
 }
 
+static int s2n_test_cert_validation_cb(struct s2n_connection *conn, struct s2n_cert_validation_info *info, void *context)
+{
+    return S2N_SUCCESS;
+}
+
 static int s2n_test_async_pkey_fn(struct s2n_connection *conn, struct s2n_async_pkey_op *op)
 {
     return S2N_SUCCESS;
@@ -56,7 +69,7 @@ int main(int argc, char **argv)
 
     const s2n_mode modes[] = { S2N_CLIENT, S2N_SERVER };
 
-    const struct s2n_security_policy *default_security_policy, *tls13_security_policy, *fips_security_policy;
+    const struct s2n_security_policy *default_security_policy = NULL, *tls13_security_policy = NULL, *fips_security_policy = NULL;
     EXPECT_SUCCESS(s2n_find_security_policy_from_version("default_tls13", &tls13_security_policy));
     EXPECT_SUCCESS(s2n_find_security_policy_from_version("default_fips", &fips_security_policy));
     EXPECT_SUCCESS(s2n_find_security_policy_from_version("default", &default_security_policy));
@@ -68,7 +81,7 @@ int main(int argc, char **argv)
 
     /* Test: s2n_config_new and tls13_default_config match */
     {
-        struct s2n_config *config, *default_config;
+        struct s2n_config *config = NULL, *default_config = NULL;
 
         EXPECT_NOT_NULL(config = s2n_config_new());
         EXPECT_NOT_NULL(default_config = s2n_fetch_default_config());
@@ -93,8 +106,8 @@ int main(int argc, char **argv)
     {
         /* For TLS1.2 */
         if (!s2n_is_in_fips_mode()) {
-            struct s2n_connection *conn;
-            const struct s2n_security_policy *security_policy;
+            struct s2n_connection *conn = NULL;
+            const struct s2n_security_policy *security_policy = NULL;
             EXPECT_NOT_NULL(conn = s2n_connection_new(S2N_CLIENT));
 
             EXPECT_EQUAL(conn->config, s2n_fetch_default_config());
@@ -108,8 +121,8 @@ int main(int argc, char **argv)
         /* For TLS1.3 */
         {
             EXPECT_SUCCESS(s2n_enable_tls13_in_test());
-            struct s2n_connection *conn;
-            const struct s2n_security_policy *security_policy;
+            struct s2n_connection *conn = NULL;
+            const struct s2n_security_policy *security_policy = NULL;
             EXPECT_NOT_NULL(conn = s2n_connection_new(S2N_CLIENT));
 
             EXPECT_EQUAL(conn->config, s2n_fetch_default_config());
@@ -123,8 +136,8 @@ int main(int argc, char **argv)
 
         /* For fips */
         if (s2n_is_in_fips_mode()) {
-            struct s2n_connection *conn;
-            const struct s2n_security_policy *security_policy;
+            struct s2n_connection *conn = NULL;
+            const struct s2n_security_policy *security_policy = NULL;
             EXPECT_NOT_NULL(conn = s2n_connection_new(S2N_CLIENT));
 
             EXPECT_EQUAL(conn->config, s2n_fetch_default_config());
@@ -140,7 +153,7 @@ int main(int argc, char **argv)
     /* Test for s2n_config_new() and tls 1.3 behavior */
     {
         if (!s2n_is_in_fips_mode()) {
-            struct s2n_config *config;
+            struct s2n_config *config = NULL;
             EXPECT_NOT_NULL(config = s2n_config_new());
             EXPECT_EQUAL(config->security_policy, default_security_policy);
             EXPECT_EQUAL(config->security_policy->cipher_preferences, &cipher_preferences_20170210);
@@ -192,7 +205,7 @@ int main(int argc, char **argv)
             struct s2n_connection *conn = NULL;
             EXPECT_NOT_NULL(conn = s2n_connection_new(S2N_SERVER));
 
-            struct s2n_config *config;
+            struct s2n_config *config = NULL;
             uint8_t num_tickets = 1;
 
             EXPECT_NOT_NULL(config = s2n_config_new());
@@ -249,6 +262,23 @@ int main(int argc, char **argv)
 
             EXPECT_SUCCESS(s2n_connection_free(conn));
             EXPECT_SUCCESS(s2n_config_free(config));
+        };
+
+        /* Test that security policy validation is enforced on the config */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            DEFER_CLEANUP(struct s2n_connection *conn = s2n_connection_new(S2N_SERVER), s2n_connection_ptr_free);
+            EXPECT_NOT_NULL(conn);
+
+            DEFER_CLEANUP(struct s2n_cert_chain_and_key *invalid_cert = NULL, s2n_cert_chain_and_key_ptr_free);
+            EXPECT_SUCCESS(s2n_test_cert_permutation_load_server_chain(&invalid_cert, "rsae", "pss", "4096", "sha384"));
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(config, invalid_cert));
+            struct s2n_security_policy rfc9151_applied_locally = security_policy_rfc9151;
+            rfc9151_applied_locally.certificate_preferences_apply_locally = true;
+            config->security_policy = &rfc9151_applied_locally;
+
+            EXPECT_FAILURE_WITH_ERRNO(s2n_connection_set_config(conn, config), S2N_ERR_SECURITY_POLICY_INCOMPATIBLE_CERT);
         };
     };
 
@@ -599,6 +629,33 @@ int main(int argc, char **argv)
         EXPECT_EQUAL(config->crl_lookup_ctx, NULL);
     };
 
+    /* Test s2n_config_set_cert_validation_cb */
+    {
+        uint8_t context = 0;
+        DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+        EXPECT_NOT_NULL(config);
+
+        /* Unset by default */
+        EXPECT_EQUAL(config->cert_validation_cb, NULL);
+        EXPECT_EQUAL(config->cert_validation_ctx, NULL);
+
+        /* Safety */
+        EXPECT_FAILURE_WITH_ERRNO(s2n_config_set_cert_validation_cb(NULL, s2n_test_cert_validation_cb, &context),
+                S2N_ERR_NULL);
+        EXPECT_SUCCESS(s2n_config_set_cert_validation_cb(config, NULL, &context));
+        EXPECT_SUCCESS(s2n_config_set_cert_validation_cb(config, s2n_test_cert_validation_cb, NULL));
+
+        /* Set */
+        EXPECT_SUCCESS(s2n_config_set_cert_validation_cb(config, s2n_test_cert_validation_cb, &context));
+        EXPECT_EQUAL(config->cert_validation_cb, s2n_test_cert_validation_cb);
+        EXPECT_EQUAL(config->cert_validation_ctx, &context);
+
+        /* Unset */
+        EXPECT_SUCCESS(s2n_config_set_cert_validation_cb(config, NULL, NULL));
+        EXPECT_EQUAL(config->cert_validation_cb, NULL);
+        EXPECT_EQUAL(config->cert_validation_ctx, NULL);
+    };
+
     /* Test s2n_config_set_status_request_type */
     for (size_t mode_i = 0; mode_i < s2n_array_len(modes); mode_i++) {
         s2n_mode mode = modes[mode_i];
@@ -731,5 +788,390 @@ int main(int argc, char **argv)
         EXPECT_SUCCESS(s2n_connection_set_config(conn, config));
     };
 
+    /* Test loading system certs */
+    {
+        /* s2n_config_load_system_certs safety */
+        {
+            EXPECT_FAILURE_WITH_ERRNO(s2n_config_load_system_certs(NULL), S2N_ERR_NULL);
+        }
+
+        /* s2n_config_new_minimal should not load system certs */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new_minimal(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            EXPECT_NULL(config->trust_store.trust_store);
+            EXPECT_FALSE(config->trust_store.loaded_system_certs);
+
+            /* System certs can be loaded onto the minimal config */
+            EXPECT_SUCCESS(s2n_config_load_system_certs(config));
+            EXPECT_NOT_NULL(config->trust_store.trust_store);
+            EXPECT_TRUE(config->trust_store.loaded_system_certs);
+
+            /* Attempting to load system certs multiple times on the same config should error */
+            for (int i = 0; i < 20; i++) {
+                EXPECT_FAILURE_WITH_ERRNO(s2n_config_load_system_certs(config), S2N_ERR_X509_TRUST_STORE);
+                EXPECT_TRUE(config->trust_store.loaded_system_certs);
+            }
+        }
+
+        /* s2n_config_new should load system certs */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            EXPECT_NOT_NULL(config->trust_store.trust_store);
+            EXPECT_TRUE(config->trust_store.loaded_system_certs);
+
+            /* Attempting to load system certs multiple times on the same config should error */
+            for (int i = 0; i < 20; i++) {
+                EXPECT_FAILURE_WITH_ERRNO(s2n_config_load_system_certs(config), S2N_ERR_X509_TRUST_STORE);
+                EXPECT_TRUE(config->trust_store.loaded_system_certs);
+            }
+        }
+
+        /* The default config should load system certs */
+        {
+            struct s2n_config *config = s2n_fetch_default_config();
+            EXPECT_NOT_NULL(config);
+            EXPECT_TRUE(config->trust_store.loaded_system_certs);
+        }
+
+        /* System certs can be loaded again after wiping the trust store */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+
+            for (int i = 0; i < 20; i++) {
+                /* System certs were already loaded, so an attempt to load them should fail */
+                EXPECT_NOT_NULL(config->trust_store.trust_store);
+                EXPECT_TRUE(config->trust_store.loaded_system_certs);
+                EXPECT_FAILURE_WITH_ERRNO(s2n_config_load_system_certs(config), S2N_ERR_X509_TRUST_STORE);
+
+                EXPECT_SUCCESS(s2n_config_wipe_trust_store(config));
+
+                /* The trust store is cleared after a wipe, so it should be possible to load system certs again */
+                EXPECT_FALSE(config->trust_store.loaded_system_certs);
+                EXPECT_SUCCESS(s2n_config_load_system_certs(config));
+                EXPECT_TRUE(config->trust_store.loaded_system_certs);
+            }
+        }
+
+        /* Ensure that system certs are properly loaded into the X509_STORE.
+         *
+         * The API used to retrieve the contents of an X509_STORE, X509_STORE_get0_objects,
+         * wasn't added until OpenSSL 1.1.0.
+         */
+#if S2N_OPENSSL_VERSION_AT_LEAST(1, 1, 0)
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new_minimal(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            EXPECT_NULL(config->trust_store.trust_store);
+            EXPECT_FALSE(config->trust_store.loaded_system_certs);
+
+            /* Initialize the X509_STORE by adding a cert */
+            EXPECT_SUCCESS(s2n_x509_trust_store_from_ca_file(&config->trust_store, S2N_RSA_PSS_2048_SHA256_CA_CERT, NULL));
+            EXPECT_NOT_NULL(config->trust_store.trust_store);
+            EXPECT_FALSE(config->trust_store.loaded_system_certs);
+
+            /* The X509_STORE should only contain the single cert that was added. */
+            STACK_OF(X509_OBJECT) *x509_store_contents = X509_STORE_get0_objects(config->trust_store.trust_store);
+            EXPECT_NOT_NULL(x509_store_contents);
+            int initial_contents_count = sk_X509_OBJECT_num(x509_store_contents);
+            EXPECT_EQUAL(initial_contents_count, 1);
+
+            /* Override the system cert file to guarantee that a system cert will be loaded */
+            EXPECT_SUCCESS(setenv("SSL_CERT_FILE", S2N_SHA1_ROOT_SIGNATURE_CA_CERT, 1));
+
+            /* Load the system cert into the store */
+            EXPECT_SUCCESS(s2n_config_load_system_certs(config));
+            EXPECT_TRUE(config->trust_store.loaded_system_certs);
+            int system_certs_contents_count = sk_X509_OBJECT_num(x509_store_contents);
+
+            /* LibreSSL doesn't use the SSL_CERT_FILE environment variable to set the system cert location,
+             * so we don't know how many system certs will be loaded, if any.
+             */
+            if (!s2n_libcrypto_is_libressl()) {
+                EXPECT_EQUAL(system_certs_contents_count, initial_contents_count + 1);
+            }
+
+            /* Additional calls to s2n_config_load_default_certs should not add additional certs to the store */
+            for (int i = 0; i < 20; i++) {
+                EXPECT_FAILURE_WITH_ERRNO(s2n_config_load_system_certs(config), S2N_ERR_X509_TRUST_STORE);
+                EXPECT_TRUE(config->trust_store.loaded_system_certs);
+                int additional_call_contents_count = sk_X509_OBJECT_num(x509_store_contents);
+                EXPECT_TRUE(additional_call_contents_count == system_certs_contents_count);
+            }
+
+            EXPECT_SUCCESS(unsetenv("SSL_CERT_FILE"));
+        }
+#endif
+
+        /* Self-talk tests */
+        {
+            DEFER_CLEANUP(struct s2n_cert_chain_and_key *chain_and_key = NULL,
+                    s2n_cert_chain_and_key_ptr_free);
+            EXPECT_SUCCESS(s2n_test_cert_chain_and_key_new(&chain_and_key,
+                    S2N_DEFAULT_TEST_CERT_CHAIN, S2N_DEFAULT_TEST_PRIVATE_KEY));
+
+            /* Ensure a handshake succeeds with a minimal server config and no mutual auth */
+            {
+                DEFER_CLEANUP(struct s2n_config *server_config = s2n_config_new_minimal(), s2n_config_ptr_free);
+                EXPECT_NOT_NULL(server_config);
+                EXPECT_SUCCESS(s2n_config_set_cipher_preferences(server_config, "default"));
+                EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(server_config, chain_and_key));
+
+                DEFER_CLEANUP(struct s2n_connection *server_conn = s2n_connection_new(S2N_SERVER),
+                        s2n_connection_ptr_free);
+                EXPECT_NOT_NULL(server_conn);
+                EXPECT_SUCCESS(s2n_connection_set_config(server_conn, server_config));
+
+                DEFER_CLEANUP(struct s2n_config *client_config = s2n_config_new_minimal(), s2n_config_ptr_free);
+                EXPECT_NOT_NULL(client_config);
+                EXPECT_SUCCESS(s2n_config_set_cipher_preferences(client_config, "default"));
+                EXPECT_SUCCESS(s2n_config_set_verification_ca_location(client_config, S2N_DEFAULT_TEST_CERT_CHAIN, NULL));
+
+                DEFER_CLEANUP(struct s2n_connection *client_conn = s2n_connection_new(S2N_CLIENT),
+                        s2n_connection_ptr_free);
+                EXPECT_NOT_NULL(client_conn);
+                EXPECT_SUCCESS(s2n_connection_set_config(client_conn, client_config));
+                EXPECT_SUCCESS(s2n_set_server_name(client_conn, "s2nTestServer"));
+
+                struct s2n_test_io_pair io_pair = { 0 };
+                EXPECT_SUCCESS(s2n_io_pair_init_non_blocking(&io_pair));
+                EXPECT_SUCCESS(s2n_connections_set_io_pair(client_conn, server_conn, &io_pair));
+
+                EXPECT_FALSE(server_config->trust_store.loaded_system_certs);
+                EXPECT_NULL(server_config->trust_store.trust_store);
+
+                EXPECT_FALSE(client_config->trust_store.loaded_system_certs);
+                EXPECT_NOT_NULL(client_config->trust_store.trust_store);
+
+                EXPECT_SUCCESS(s2n_negotiate_test_server_and_client(server_conn, client_conn));
+            }
+
+            /* Ensure a handshake fails gracefully with an uninitialized trust store */
+            {
+                DEFER_CLEANUP(struct s2n_config *server_config = s2n_config_new_minimal(), s2n_config_ptr_free);
+                EXPECT_NOT_NULL(server_config);
+                EXPECT_SUCCESS(s2n_config_set_cipher_preferences(server_config, "default"));
+                EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(server_config, chain_and_key));
+
+                DEFER_CLEANUP(struct s2n_connection *server_conn = s2n_connection_new(S2N_SERVER),
+                        s2n_connection_ptr_free);
+                EXPECT_NOT_NULL(server_conn);
+                EXPECT_SUCCESS(s2n_connection_set_config(server_conn, server_config));
+
+                DEFER_CLEANUP(struct s2n_config *client_config = s2n_config_new_minimal(), s2n_config_ptr_free);
+                EXPECT_SUCCESS(s2n_config_set_cipher_preferences(client_config, "default"));
+                EXPECT_NOT_NULL(client_config);
+
+                DEFER_CLEANUP(struct s2n_connection *client_conn = s2n_connection_new(S2N_CLIENT),
+                        s2n_connection_ptr_free);
+                EXPECT_NOT_NULL(client_conn);
+                EXPECT_SUCCESS(s2n_connection_set_config(client_conn, client_config));
+                EXPECT_SUCCESS(s2n_connection_set_blinding(client_conn, S2N_SELF_SERVICE_BLINDING));
+
+                struct s2n_test_io_pair io_pair = { 0 };
+                EXPECT_SUCCESS(s2n_io_pair_init_non_blocking(&io_pair));
+                EXPECT_SUCCESS(s2n_connections_set_io_pair(client_conn, server_conn, &io_pair));
+
+                EXPECT_FALSE(server_config->trust_store.loaded_system_certs);
+                EXPECT_NULL(server_config->trust_store.trust_store);
+
+                EXPECT_FALSE(client_config->trust_store.loaded_system_certs);
+                EXPECT_NULL(client_config->trust_store.trust_store);
+
+                /* The client should fail to validate the server's certificate without an initialized trust store */
+                EXPECT_FAILURE_WITH_ERRNO(s2n_negotiate_test_server_and_client(server_conn, client_conn),
+                        S2N_ERR_CERT_UNTRUSTED);
+            }
+        }
+    }
+
+    /* s2n_config_disable_x509_time_verification tests */
+    {
+        /* Safety */
+        EXPECT_FAILURE_WITH_ERRNO(s2n_config_disable_x509_time_verification(NULL), S2N_ERR_NULL);
+
+        /* Ensure s2n_config_disable_x509_time_verification sets the proper state */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            EXPECT_EQUAL(config->disable_x509_time_validation, false);
+
+            EXPECT_SUCCESS(s2n_config_disable_x509_time_verification(config));
+            EXPECT_EQUAL(config->disable_x509_time_validation, true);
+        }
+    }
+
+    /* Test s2n_config_get_supported_groups */
+    {
+        /* Safety */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            uint16_t supported_groups[S2N_TEST_MAX_SUPPORTED_GROUPS_COUNT] = { 0 };
+            uint16_t supported_groups_count = 0;
+
+            int ret = s2n_config_get_supported_groups(NULL, supported_groups, s2n_array_len(supported_groups),
+                    &supported_groups_count);
+            EXPECT_FAILURE_WITH_ERRNO(ret, S2N_ERR_NULL);
+            EXPECT_EQUAL(supported_groups_count, 0);
+
+            ret = s2n_config_get_supported_groups(config, NULL, s2n_array_len(supported_groups), &supported_groups_count);
+            EXPECT_FAILURE_WITH_ERRNO(ret, S2N_ERR_NULL);
+            EXPECT_EQUAL(supported_groups_count, 0);
+
+            ret = s2n_config_get_supported_groups(config, supported_groups, s2n_array_len(supported_groups), NULL);
+            EXPECT_FAILURE_WITH_ERRNO(ret, S2N_ERR_NULL);
+            EXPECT_EQUAL(supported_groups_count, 0);
+        }
+
+        /* Error if the provided supported groups array is too small */
+        {
+            /* Test a policy with and without PQ kem groups */
+            const char *policies[] = {
+                "20170210",
+                "PQ-TLS-1-2-2023-10-07",
+            };
+
+            for (size_t i = 0; i < s2n_array_len(policies); i++) {
+                DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+                EXPECT_NOT_NULL(config);
+                EXPECT_SUCCESS(s2n_config_set_cipher_preferences(config, policies[i]));
+
+                uint32_t policy_groups_count = 0;
+                EXPECT_OK(s2n_kem_preferences_groups_available(config->security_policy->kem_preferences,
+                        &policy_groups_count));
+                policy_groups_count += config->security_policy->ecc_preferences->count;
+                EXPECT_TRUE(policy_groups_count > 0);
+
+                uint16_t supported_groups[S2N_TEST_MAX_SUPPORTED_GROUPS_COUNT] = { 0 };
+                uint16_t supported_groups_count = 11;
+                for (size_t invalid_count = 0; invalid_count < policy_groups_count; invalid_count++) {
+                    int ret = s2n_config_get_supported_groups(config, supported_groups, invalid_count,
+                            &supported_groups_count);
+                    EXPECT_FAILURE_WITH_ERRNO(ret, S2N_ERR_INSUFFICIENT_MEM_SIZE);
+                    EXPECT_EQUAL(supported_groups_count, 0);
+                }
+
+                EXPECT_SUCCESS(s2n_config_get_supported_groups(config, supported_groups, policy_groups_count,
+                        &supported_groups_count));
+                EXPECT_EQUAL(supported_groups_count, policy_groups_count);
+            }
+        }
+
+        /* The groups produced by s2n_config_get_supported_groups should match the groups produced
+         * by a connection that's configured to send its entire list of supported groups
+         */
+        for (size_t policy_idx = 0; security_policy_selection[policy_idx].version != NULL; policy_idx++) {
+            const struct s2n_security_policy *security_policy = security_policy_selection[policy_idx].security_policy;
+            EXPECT_NOT_NULL(security_policy);
+
+            uint32_t expected_groups_count = 0;
+            EXPECT_OK(s2n_kem_preferences_groups_available(security_policy->kem_preferences, &expected_groups_count));
+            expected_groups_count += security_policy->ecc_preferences->count;
+
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_NOT_NULL(config);
+            config->security_policy = security_policy;
+
+            uint16_t supported_groups[S2N_TEST_MAX_SUPPORTED_GROUPS_COUNT] = { 0 };
+            uint16_t supported_groups_count = 0;
+            EXPECT_SUCCESS(s2n_config_get_supported_groups(config, supported_groups, s2n_array_len(supported_groups),
+                    &supported_groups_count));
+            EXPECT_EQUAL(supported_groups_count, expected_groups_count);
+
+            DEFER_CLEANUP(struct s2n_connection *conn = s2n_connection_new(S2N_CLIENT), s2n_connection_ptr_free);
+            EXPECT_NOT_NULL(conn);
+            EXPECT_SUCCESS(s2n_connection_set_config(conn, config));
+            /* PQ kem groups aren't sent in the supported groups extension before TLS 1.3. */
+            conn->actual_protocol_version = S2N_TLS13;
+
+            DEFER_CLEANUP(struct s2n_stuffer extension_stuffer = { 0 }, s2n_stuffer_free);
+            EXPECT_SUCCESS(s2n_stuffer_growable_alloc(&extension_stuffer, 0));
+            EXPECT_SUCCESS(s2n_client_supported_groups_extension.send(conn, &extension_stuffer));
+
+            uint16_t extension_groups_count = 0;
+            EXPECT_OK(s2n_supported_groups_parse_count(&extension_stuffer, &extension_groups_count));
+            EXPECT_EQUAL(extension_groups_count, expected_groups_count);
+
+            for (size_t i = 0; i < supported_groups_count; i++) {
+                /* s2n_stuffer_read_uint16 is used to read each of the supported groups in
+                 * network-order endianness.
+                 */
+                uint16_t group_iana = 0;
+                POSIX_GUARD(s2n_stuffer_read_uint16(&extension_stuffer, &group_iana));
+
+                EXPECT_EQUAL(group_iana, supported_groups[i]);
+            }
+        }
+    }
+
+    /* Test s2n_config_validate_loaded_certificates */
+    {
+        DEFER_CLEANUP(struct s2n_cert_chain_and_key *invalid_cert = NULL, s2n_cert_chain_and_key_ptr_free);
+        DEFER_CLEANUP(struct s2n_cert_chain_and_key *valid_cert = NULL, s2n_cert_chain_and_key_ptr_free);
+        EXPECT_SUCCESS(s2n_test_cert_permutation_load_server_chain(&invalid_cert, "ec", "ecdsa", "p384", "sha256"));
+        EXPECT_SUCCESS(s2n_test_cert_permutation_load_server_chain(&valid_cert, "ec", "ecdsa", "p384", "sha384"));
+
+        struct s2n_security_policy rfc9151_applied_locally = security_policy_rfc9151;
+        rfc9151_applied_locally.certificate_preferences_apply_locally = true;
+
+        /* rfc9151 doesn't allow SHA256 signatures, but does allow SHA384 signatures, 
+         * so ecdsa_p384_sha256 is invalid and ecdsa_p384_sha384 is valid */
+
+        /* valid certs are accepted */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(config, valid_cert));
+            EXPECT_OK(s2n_config_validate_loaded_certificates(config, &rfc9151_applied_locally));
+        };
+
+        /* when cert preferences don't apply locally, invalid certs are accepted */
+        {
+            struct s2n_security_policy non_local_rfc9151 = security_policy_rfc9151;
+            non_local_rfc9151.certificate_preferences_apply_locally = false;
+
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(config, invalid_cert));
+            EXPECT_OK(s2n_config_validate_loaded_certificates(config, &non_local_rfc9151));
+        };
+
+        /* Certs in an s2n_config are stored in default_certs_by_type, domain_name_to_cert_map, or
+         * both. We want to ensure that the s2n_config_validate_loaded_certificates method will
+         * validate certs in both locations.
+         */
+
+        /* certs in default_certs_by_type are validated */
+        {
+            /* s2n_config_set_cert_chain_and_key_defaults populates default_certs_by_type 
+             * but doesn't populate domain_name_to_cert_map 
+             */
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new_minimal(), s2n_config_ptr_free);
+            EXPECT_SUCCESS(s2n_config_set_cert_chain_and_key_defaults(config, &invalid_cert, 1));
+
+            /* domain certs is empty */
+            uint32_t domain_certs_count = 0;
+            EXPECT_OK(s2n_map_size(config->domain_name_to_cert_map, &domain_certs_count));
+            EXPECT_EQUAL(domain_certs_count, 0);
+
+            /* certs in default_certs_by_type are validated */
+            EXPECT_ERROR_WITH_ERRNO(s2n_config_validate_loaded_certificates(config, &rfc9151_applied_locally),
+                    S2N_ERR_SECURITY_POLICY_INCOMPATIBLE_CERT);
+        };
+
+        /* certs in the domain map are validated */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(), s2n_config_ptr_free);
+            EXPECT_SUCCESS(s2n_config_build_domain_name_to_cert_map(config, invalid_cert));
+
+            /* default_certs_by_type is empty. */
+            EXPECT_EQUAL(s2n_config_get_num_default_certs(config), 0);
+
+            /* certs in domain_map are validated */
+            EXPECT_ERROR_WITH_ERRNO(s2n_config_validate_loaded_certificates(config, &rfc9151_applied_locally),
+                    S2N_ERR_SECURITY_POLICY_INCOMPATIBLE_CERT);
+        };
+    };
     END_TEST();
 }

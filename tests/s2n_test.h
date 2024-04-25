@@ -61,17 +61,12 @@ int test_count;
  * not initialise at the start of the test. Useful for tests that e.g spawn a
  * number of independent childs at the start of a unit test and where you want
  * each child to have its own independently initialised s2n.
- *
- * BEGIN_TEST() prints unit test information to stdout. But this often gets
- * buffered by the kernel and will then be flushed in each child spawned. The
- * result is a number of repeated messages being send to stdout and, in turn,
- * appear in the logs. At the moment, we think this is better than risking not
- * having any printing at all.
  */
 #define BEGIN_TEST_NO_INIT()                                        \
     do {                                                            \
         test_count = 0;                                             \
         fprintf(stdout, "Running %-50s ... ", __FILE__);            \
+        fflush(stdout);                                             \
         EXPECT_SUCCESS_WITHOUT_COUNT(s2n_in_unit_test_set(true));   \
         S2N_TEST_OPTIONALLY_ENABLE_FIPS_MODE();                     \
     } while(0)
@@ -107,23 +102,23 @@ int test_count;
                         } while(0)
 
 #define FAIL_MSG_PRINT( msg ) do { \
-                          s2n_print_stacktrace(stderr); \
-                          /* isatty will overwrite errno on failure */ \
+                          /* isatty and s2n_print_stacktrace will overwrite errno on failure */ \
                           int real_errno = errno; \
+                          s2n_print_stacktrace(stderr); \
                           if (isatty(fileno(stderr))) { \
                             errno = real_errno; \
-                            fprintf(stderr, "\033[31;1mFAILED test %d\033[0m\n%s (%s:%d)\nError Message: '%s'\n Debug String: '%s'\n System Error: %s (%d)\n", test_count, (msg), __FILE__, __LINE__, s2n_strerror(s2n_errno, "EN"), s2n_debug_str, strerror(errno), errno); \
+                            fprintf(stderr, "\033[31;1mFAILED test %d\033[0m\n%s (%s:%d)\nError Message: '%s'\n Debug String: '%s'\n System Error: %s (%d)\n", test_count, (msg), __FILE__, __LINE__, s2n_strerror(s2n_errno, "EN"), s2n_strerror_debug(s2n_errno, "EN"), strerror(errno), errno); \
                           } \
                           else { \
                             errno = real_errno; \
-                            fprintf(stderr, "FAILED test %d\n%s (%s:%d)\nError Message: '%s'\n Debug String: '%s'\n System Error: %s (%d)\n", test_count, (msg), __FILE__, __LINE__, s2n_strerror(s2n_errno, "EN"), s2n_debug_str, strerror(errno), errno); \
+                            fprintf(stderr, "FAILED test %d\n%s (%s:%d)\nError Message: '%s'\n Debug String: '%s'\n System Error: %s (%d)\n", test_count, (msg), __FILE__, __LINE__, s2n_strerror(s2n_errno, "EN"), s2n_strerror_debug(s2n_errno, "EN"), strerror(errno), errno); \
                           } \
                         } while(0)
 
 #define RESET_ERRNO() \
     do { \
         s2n_errno = 0; \
-        s2n_debug_str = NULL; \
+        s2n_debug_info_reset(); \
         errno = 0; \
     } while(0);
 
@@ -140,14 +135,14 @@ int test_count;
     do { \
         EXPECT_EQUAL( (function_call) ,  -1 ); \
         EXPECT_NOT_EQUAL(s2n_errno, 0); \
-        EXPECT_NOT_NULL(s2n_debug_str); \
+        EXPECT_NOT_NULL(s2n_strerror_debug(s2n_errno, "EN")); \
         RESET_ERRNO(); \
     } while(0)
 #define EXPECT_ERROR( function_call ) \
     do { \
         EXPECT_TRUE( s2n_result_is_error(function_call) ); \
         EXPECT_NOT_EQUAL(s2n_errno, 0); \
-        EXPECT_NOT_NULL(s2n_debug_str); \
+        EXPECT_NOT_NULL(s2n_strerror_debug(s2n_errno, "EN")); \
         RESET_ERRNO(); \
     } while(0)
 
@@ -155,7 +150,7 @@ int test_count;
     do { \
         EXPECT_EQUAL( (function_call), -1 ); \
         EXPECT_EQUAL(s2n_errno, err); \
-        EXPECT_NOT_NULL(s2n_debug_str); \
+        EXPECT_NOT_NULL(s2n_strerror_debug(s2n_errno, "EN")); \
     } while(0)
 
 #define EXPECT_FAILURE_WITH_ERRNO( function_call, err ) \
@@ -178,7 +173,7 @@ int test_count;
     do { \
         EXPECT_TRUE( s2n_result_is_error(function_call) ); \
         EXPECT_EQUAL(s2n_errno, err); \
-        EXPECT_NOT_NULL(s2n_debug_str); \
+        EXPECT_NOT_NULL(s2n_strerror_debug(s2n_errno, "EN")); \
     } while(0)
 
 /* for use with S2N_RESULT */
@@ -192,7 +187,7 @@ int test_count;
     do { \
         EXPECT_NULL( (function_call) ); \
         EXPECT_EQUAL(s2n_errno, err); \
-        EXPECT_NOT_NULL(s2n_debug_str); \
+        EXPECT_NOT_NULL(s2n_strerror_debug(s2n_errno, "EN")); \
     } while(0)
 
 #define EXPECT_NULL_WITH_ERRNO( function_call, err ) \

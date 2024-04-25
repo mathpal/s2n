@@ -142,8 +142,8 @@ void mock_client(struct s2n_test_io_pair *io_pair)
     size_t serialized_session_state_length = 0;
     uint8_t serialized_session_state[256] = { 0 };
 
-    struct s2n_connection *conn;
-    struct s2n_config *config;
+    struct s2n_connection *conn = NULL;
+    struct s2n_config *config = NULL;
     s2n_blocked_status blocked;
     int result = 0;
 
@@ -244,6 +244,7 @@ void mock_client(struct s2n_test_io_pair *io_pair)
 
     /* Session resumption with bad session state */
     conn = s2n_connection_new(S2N_CLIENT);
+    EXPECT_SUCCESS(s2n_connection_set_blinding(conn, S2N_SELF_SERVICE_BLINDING));
     s2n_connection_set_io_pair(conn, io_pair);
 
     /* Change the format of the session state and check we cannot deserialize it */
@@ -287,18 +288,18 @@ void mock_client(struct s2n_test_io_pair *io_pair)
 
 int main(int argc, char **argv)
 {
-    struct s2n_connection *conn;
-    struct s2n_config *config;
+    struct s2n_connection *conn = NULL;
+    struct s2n_config *config = NULL;
     s2n_blocked_status blocked;
-    int status;
-    pid_t pid;
-    char *cert_chain_pem;
-    char *private_key_pem;
-    struct s2n_cert_chain_and_key *chain_and_key;
+    int status = 0;
+    pid_t pid = 0;
+    char *cert_chain_pem = NULL;
+    char *private_key_pem = NULL;
+    struct s2n_cert_chain_and_key *chain_and_key = NULL;
     char buffer[256];
-    int bytes_read;
+    int bytes_read = 0;
     int shutdown_rc = -1;
-    uint64_t now;
+    uint64_t now = 0;
     uint8_t session_id_from_server[MAX_KEY_LEN];
     uint8_t session_id_from_client[MAX_KEY_LEN];
 
@@ -560,6 +561,7 @@ int main(int argc, char **argv)
         /* Wipe connections and set up new handshake */
         EXPECT_SUCCESS(s2n_connection_wipe(server_conn));
         EXPECT_SUCCESS(s2n_connection_wipe(client_conn));
+        EXPECT_SUCCESS(s2n_connection_set_blinding(server_conn, S2N_SELF_SERVICE_BLINDING));
         EXPECT_SUCCESS(s2n_io_pair_close(&io_pair));
         EXPECT_SUCCESS(s2n_io_pair_init_non_blocking(&io_pair));
         EXPECT_SUCCESS(s2n_connections_set_io_pair(client_conn, server_conn, &io_pair));

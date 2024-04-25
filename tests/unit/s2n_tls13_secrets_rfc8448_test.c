@@ -75,9 +75,9 @@ int main(int argc, char **argv)
                 conn->secure->cipher_suite = cipher_suite;
 
                 EXPECT_OK(s2n_tls13_extract_secret(conn, S2N_EARLY_SECRET));
-                EXPECT_BYTEARRAY_EQUAL(conn->secrets.tls13.extract_secret,
+                EXPECT_BYTEARRAY_EQUAL(conn->secrets.version.tls13.extract_secret,
                         early_secret.data, early_secret.size);
-                EXPECT_EQUAL(conn->secrets.tls13.extract_secret_type, S2N_EARLY_SECRET);
+                EXPECT_EQUAL(conn->secrets.extract_secret_type, S2N_EARLY_SECRET);
             }
         };
 
@@ -161,9 +161,9 @@ int main(int argc, char **argv)
                 EXPECT_NOT_NULL(conn->kex_params.client_ecc_evp_params.evp_pkey);
 
                 EXPECT_OK(s2n_tls13_extract_secret(conn, S2N_HANDSHAKE_SECRET));
-                EXPECT_BYTEARRAY_EQUAL(conn->secrets.tls13.extract_secret,
+                EXPECT_BYTEARRAY_EQUAL(conn->secrets.version.tls13.extract_secret,
                         handshake_secret.data, handshake_secret.size);
-                EXPECT_EQUAL(conn->secrets.tls13.extract_secret_type, S2N_HANDSHAKE_SECRET);
+                EXPECT_EQUAL(conn->secrets.extract_secret_type, S2N_HANDSHAKE_SECRET);
             };
 
             /* Client */
@@ -183,9 +183,9 @@ int main(int argc, char **argv)
                 EXPECT_NOT_NULL(conn->kex_params.client_ecc_evp_params.evp_pkey);
 
                 EXPECT_OK(s2n_tls13_extract_secret(conn, S2N_HANDSHAKE_SECRET));
-                EXPECT_BYTEARRAY_EQUAL(conn->secrets.tls13.extract_secret,
+                EXPECT_BYTEARRAY_EQUAL(conn->secrets.version.tls13.extract_secret,
                         handshake_secret.data, handshake_secret.size);
-                EXPECT_EQUAL(conn->secrets.tls13.extract_secret_type, S2N_HANDSHAKE_SECRET);
+                EXPECT_EQUAL(conn->secrets.extract_secret_type, S2N_HANDSHAKE_SECRET);
             };
         }
 #endif
@@ -362,9 +362,9 @@ int main(int argc, char **argv)
                 EXPECT_OK(s2n_connection_set_test_handshake_secret(conn, &handshake_secret));
 
                 EXPECT_OK(s2n_tls13_extract_secret(conn, S2N_MASTER_SECRET));
-                EXPECT_BYTEARRAY_EQUAL(conn->secrets.tls13.extract_secret,
+                EXPECT_BYTEARRAY_EQUAL(conn->secrets.version.tls13.extract_secret,
                         master_secret.data, master_secret.size);
-                EXPECT_EQUAL(conn->secrets.tls13.extract_secret_type, S2N_MASTER_SECRET);
+                EXPECT_EQUAL(conn->secrets.extract_secret_type, S2N_MASTER_SECRET);
             }
         };
 
@@ -494,8 +494,52 @@ int main(int argc, char **argv)
 
                 EXPECT_OK(s2n_derive_resumption_master_secret(conn));
                 EXPECT_EQUAL(derived_secret.size, secret.size);
-                EXPECT_BYTEARRAY_EQUAL(conn->secrets.tls13.resumption_master_secret,
+                EXPECT_BYTEARRAY_EQUAL(conn->secrets.version.tls13.resumption_master_secret,
                         secret.data, secret.size);
+            }
+        };
+
+        /* Derive EXPORTER_MASTER_SECRET */
+        {
+            /**
+             *= https://www.rfc-editor.org/rfc/rfc8448.html#section-3
+             *= type=test
+             *#    {client}  derive secret "tls13 exp master" (same as server)
+             *
+             *= https://www.rfc-editor.org/rfc/rfc8448.html#section-3
+             *= type=test
+             *#    {server}  derive secret "tls13 exp master":
+             *#
+             *#       PRK (32 octets):  18 df 06 84 3d 13 a0 8b f2 a4 49 84 4c 5f 8a 47
+             *#          80 01 bc 4d 4c 62 79 84 d5 a4 1d a8 d0 40 29 19
+             *#
+             *#       hash (32 octets):  96 08 10 2a 0f 1c cc 6d b6 25 0b 7b 7e 41 7b 1a
+             *#          00 0e aa da 3d aa e4 77 7a 76 86 c9 ff 83 df 13
+             *#
+             **
+             *= https://www.rfc-editor.org/rfc/rfc8448.html#section-3
+             *= type=test
+             *#       info (52 octets):  00 20 10 74 6c 73 31 33 20 65 78 70 20 6d 61 73
+             *#          74 65 72 20 96 08 10 2a 0f 1c cc 6d b6 25 0b 7b 7e 41 7b 1a 00
+             *#          0e aa da 3d aa e4 77 7a 76 86 c9 ff 83 df 13
+             *#
+             *#       expanded (32 octets):  fe 22 f8 81 17 6e da 18 eb 8f 44 52 9e 67
+             *#          92 c5 0c 9a 3f 89 45 2f 68 d8 ae 31 1b 43 09 d3 cf 50
+             */
+            S2N_BLOB_FROM_HEX(hash, "96 08 10 2a 0f 1c cc 6d b6 25 0b 7b 7e 41 7b 1a \
+                       00 0e aa da 3d aa e4 77 7a 76 86 c9 ff 83 df 13");
+            S2N_BLOB_FROM_HEX(secret, "fe 22 f8 81 17 6e da 18 eb 8f 44 52 9e 67 \
+                       92 c5 0c 9a 3f 89 45 2f 68 d8 ae 31 1b 43 09 d3 cf 50");
+
+            for (size_t i = 0; i < s2n_array_len(modes); i++) {
+                DEFER_CLEANUP(struct s2n_connection *conn = s2n_connection_new(modes[i]), s2n_connection_ptr_free);
+                conn->secure->cipher_suite = cipher_suite;
+                EXPECT_OK(s2n_connection_set_test_master_secret(conn, &master_secret));
+                EXPECT_OK(s2n_connection_set_test_transcript_hash(conn, SERVER_FINISHED, &hash));
+
+                EXPECT_OK(s2n_derive_exporter_master_secret(conn, &derived_secret));
+                EXPECT_EQUAL(derived_secret.size, secret.size);
+                EXPECT_BYTEARRAY_EQUAL(derived_secret.data, secret.data, secret.size);
             }
         };
     };
@@ -542,9 +586,9 @@ int main(int argc, char **argv)
                 /* Early secret retrieved and saved for connection */
                 conn->psk_params.chosen_psk = psk;
                 EXPECT_OK(s2n_tls13_extract_secret(conn, S2N_EARLY_SECRET));
-                EXPECT_BYTEARRAY_EQUAL(conn->secrets.tls13.extract_secret,
+                EXPECT_BYTEARRAY_EQUAL(conn->secrets.version.tls13.extract_secret,
                         early_secret.data, early_secret.size);
-                EXPECT_EQUAL(conn->secrets.tls13.extract_secret_type, S2N_EARLY_SECRET);
+                EXPECT_EQUAL(conn->secrets.extract_secret_type, S2N_EARLY_SECRET);
             }
         };
 

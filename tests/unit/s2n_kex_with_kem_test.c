@@ -13,7 +13,7 @@
  * permissions and limitations under the License.
  */
 
-#include "pq-crypto/s2n_pq.h"
+#include "crypto/s2n_pq.h"
 #include "tests/s2n_test.h"
 #include "tls/s2n_cipher_suites.h"
 #include "tls/s2n_client_key_exchange.h"
@@ -40,8 +40,8 @@ static struct s2n_cipher_suite kyber_test_suite = {
 
 static int do_kex_with_kem(struct s2n_cipher_suite *cipher_suite, const char *security_policy_version, const struct s2n_kem *negotiated_kem)
 {
-    struct s2n_connection *client_conn;
-    struct s2n_connection *server_conn;
+    struct s2n_connection *client_conn = NULL;
+    struct s2n_connection *server_conn = NULL;
 
     POSIX_GUARD_PTR(client_conn = s2n_connection_new(S2N_CLIENT));
     POSIX_GUARD_PTR(server_conn = s2n_connection_new(S2N_SERVER));
@@ -116,7 +116,7 @@ static int do_kex_with_kem(struct s2n_cipher_suite *cipher_suite, const char *se
 
 static int assert_pq_disabled_checks(struct s2n_cipher_suite *cipher_suite, const char *security_policy_version, const struct s2n_kem *negotiated_kem)
 {
-    struct s2n_connection *server_conn;
+    struct s2n_connection *server_conn = NULL;
     POSIX_GUARD_PTR(server_conn = s2n_connection_new(S2N_SERVER));
     const struct s2n_security_policy *security_policy = NULL;
     POSIX_GUARD(s2n_find_security_policy_from_version(security_policy_version, &security_policy));
@@ -128,18 +128,18 @@ static int assert_pq_disabled_checks(struct s2n_cipher_suite *cipher_suite, cons
     /* If PQ is disabled:
      * s2n_check_kem() (s2n_hybrid_ecdhe_kem.connection_supported) should indicate that the connection is not supported
      * s2n_configure_kem() (s2n_hybrid_ecdhe_kem.configure_connection) should return S2N_RESULT_ERROR
-     *     set s2n_errno to S2N_ERR_PQ_DISABLED */
+     *     set s2n_errno to S2N_ERR_NO_SUPPORTED_LIBCRYPTO_API */
     bool connection_supported = true;
     POSIX_GUARD_RESULT(s2n_hybrid_ecdhe_kem.connection_supported(cipher_suite, server_conn, &connection_supported));
     POSIX_ENSURE_EQ(connection_supported, false);
 
     POSIX_ENSURE_EQ(s2n_result_is_error(s2n_hybrid_ecdhe_kem.configure_connection(cipher_suite, server_conn)), true);
 
-    POSIX_ENSURE_EQ(s2n_errno, S2N_ERR_PQ_DISABLED);
+    POSIX_ENSURE_EQ(s2n_errno, S2N_ERR_NO_SUPPORTED_LIBCRYPTO_API);
 
     POSIX_GUARD(s2n_connection_free(server_conn));
     s2n_errno = 0;
-    s2n_debug_str = NULL;
+    s2n_debug_info_reset();
 
     return S2N_SUCCESS;
 }

@@ -36,8 +36,9 @@ int s2n_fd_set_non_blocking(int fd)
 
 static int buffer_read(void *io_context, uint8_t *buf, uint32_t len)
 {
-    struct s2n_stuffer *in_buf;
-    int n_read, n_avail;
+    struct s2n_stuffer *in_buf = NULL;
+    int n_read = 0, n_avail = 0;
+    errno = EIO;
 
     if (buf == NULL) {
         return 0;
@@ -58,13 +59,13 @@ static int buffer_read(void *io_context, uint8_t *buf, uint32_t len)
         return -1;
     }
 
-    s2n_stuffer_read_bytes(in_buf, buf, n_read);
+    POSIX_GUARD(s2n_stuffer_read_bytes(in_buf, buf, n_read));
     return n_read;
 }
 
 static int buffer_write(void *io_context, const uint8_t *buf, uint32_t len)
 {
-    struct s2n_stuffer *out;
+    struct s2n_stuffer *out = NULL;
 
     if (buf == NULL) {
         return 0;
@@ -330,5 +331,14 @@ S2N_RESULT s2n_set_all_mutually_supported_groups(struct s2n_connection *conn)
         conn->kex_params.mutually_supported_kem_groups[i] = kem_pref->tls13_kem_groups[i];
     }
 
+    return S2N_RESULT_OK;
+}
+
+S2N_RESULT s2n_skip_handshake(struct s2n_connection *conn)
+{
+    conn->handshake.handshake_type = NEGOTIATED | FULL_HANDSHAKE;
+    while (!s2n_handshake_is_complete(conn)) {
+        conn->handshake.message_number++;
+    }
     return S2N_RESULT_OK;
 }

@@ -1,7 +1,12 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use s2n_tls::{config, connection::Builder, error::Error, security::DEFAULT_TLS13};
+use s2n_tls::{
+    config,
+    connection::Builder,
+    error::Error,
+    security::{DEFAULT, DEFAULT_TLS13},
+};
 use s2n_tls_tokio::{TlsAcceptor, TlsConnector, TlsStream};
 use std::time::Duration;
 use tokio::{
@@ -23,9 +28,19 @@ pub static KEY_PEM: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/examples/certs/key.pem"
 ));
+pub static RSA_CERT_PEM: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/examples/certs/cert_rsa.pem"
+));
+pub static RSA_KEY_PEM: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/examples/certs/key_rsa.pem"
+));
 
 pub const MIN_BLINDING_SECS: Duration = Duration::from_secs(10);
 pub const MAX_BLINDING_SECS: Duration = Duration::from_secs(30);
+
+pub static TEST_STR: &str = "hello world";
 
 pub async fn get_streams() -> Result<(TcpStream, TcpStream), tokio::io::Error> {
     let localhost = "127.0.0.1".to_owned();
@@ -50,6 +65,20 @@ pub fn server_config() -> Result<config::Builder, Error> {
     Ok(builder)
 }
 
+pub fn client_config_tls12() -> Result<config::Builder, Error> {
+    let mut builder = config::Config::builder();
+    builder.set_security_policy(&DEFAULT)?;
+    builder.trust_pem(RSA_CERT_PEM)?;
+    Ok(builder)
+}
+
+pub fn server_config_tls12() -> Result<config::Builder, Error> {
+    let mut builder = config::Config::builder();
+    builder.set_security_policy(&DEFAULT)?;
+    builder.load_pem(RSA_CERT_PEM, RSA_KEY_PEM)?;
+    Ok(builder)
+}
+
 pub async fn run_negotiate<A: Builder, B: Builder, C, D>(
     client: &TlsConnector<A>,
     client_stream: C,
@@ -67,4 +96,26 @@ where
         server.accept(server_stream)
     );
     Ok((client?, server?))
+}
+
+pub async fn get_tls_streams<A: Builder, B: Builder>(
+    server_builder: A,
+    client_builder: B,
+) -> Result<
+    (
+        TlsStream<TcpStream, A::Output>,
+        TlsStream<TcpStream, B::Output>,
+    ),
+    Box<dyn std::error::Error>,
+>
+where
+    <A as Builder>::Output: Unpin,
+    <B as Builder>::Output: Unpin,
+{
+    let (server_stream, client_stream) = get_streams().await?;
+    let connector = TlsConnector::new(client_builder);
+    let acceptor = TlsAcceptor::new(server_builder);
+    let (client_tls, server_tls) =
+        run_negotiate(&connector, client_stream, &acceptor, server_stream).await?;
+    Ok((server_tls, client_tls))
 }

@@ -47,6 +47,9 @@ struct s2n_connection;
  */
 struct s2n_x509_trust_store {
     X509_STORE *trust_store;
+
+    /* Indicates whether system default certs have been loaded into the trust store */
+    unsigned loaded_system_certs : 1;
 };
 
 /**
@@ -63,6 +66,11 @@ struct s2n_x509_validator {
     struct s2n_array *crl_lookup_list;
 };
 
+struct s2n_cert_validation_info {
+    unsigned finished : 1;
+    unsigned accepted : 1;
+};
+
 /** Some libcrypto implementations do not support OCSP validation. Returns 1 if supported, 0 otherwise. */
 uint8_t s2n_x509_ocsp_stapling_supported(void);
 
@@ -71,9 +79,6 @@ void s2n_x509_trust_store_init_empty(struct s2n_x509_trust_store *store);
 
 /** Returns TRUE if the trust store has certificates installed, FALSE otherwise */
 uint8_t s2n_x509_trust_store_has_certs(struct s2n_x509_trust_store *store);
-
-/** Initializes the trust store to default system paths **/
-int s2n_x509_trust_store_from_system_defaults(struct s2n_x509_trust_store *store);
 
 /** Initialize trust store from a PEM. This will allocate memory, and load PEM into the Trust Store **/
 int s2n_x509_trust_store_add_pem(struct s2n_x509_trust_store *store, const char *pem);
@@ -128,13 +133,3 @@ S2N_RESULT s2n_x509_validator_validate_cert_stapled_ocsp_response(struct s2n_x50
  * Should be verified before any use of the peer's certificate data.
  */
 bool s2n_x509_validator_is_cert_chain_validated(const struct s2n_x509_validator *validator);
-
-/**
- * Validates that each certificate in a peer's cert chain contains only signature algorithms in a security policy's
- * certificate_signatures_preference list.
- */
-S2N_RESULT s2n_validate_certificate_signature(struct s2n_connection *conn, X509 *x509_cert);
-
-/* Checks to see if a certificate has a signature algorithm that's in our certificate_signature_preferences list */
-S2N_RESULT s2n_validate_sig_scheme_supported(struct s2n_connection *conn, X509 *x509_cert,
-        const struct s2n_signature_preferences *cert_sig_preferences);

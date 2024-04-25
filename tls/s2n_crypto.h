@@ -36,7 +36,7 @@ struct s2n_kex_parameters {
     struct s2n_ecc_evp_params client_ecc_evp_params;
     struct s2n_kem_group_params server_kem_group_params;
     struct s2n_kem_group_params client_kem_group_params;
-    const struct s2n_kem_group *mutually_supported_kem_groups[S2N_SUPPORTED_KEM_GROUPS_COUNT];
+    const struct s2n_kem_group *mutually_supported_kem_groups[S2N_KEM_GROUPS_COUNT];
     struct s2n_kem_params kem_params;
     struct s2n_blob client_key_exchange_message;
     struct s2n_blob client_pq_kem_extension;
@@ -47,9 +47,12 @@ struct s2n_tls12_secrets {
     uint8_t master_secret[S2N_TLS_SECRET_LEN];
 };
 
-union s2n_secrets {
-    struct s2n_tls12_secrets tls12;
-    struct s2n_tls13_secrets tls13;
+struct s2n_secrets {
+    union {
+        struct s2n_tls12_secrets tls12;
+        struct s2n_tls13_secrets tls13;
+    } version;
+    s2n_extract_secret_type_t extract_secret_type;
 };
 
 struct s2n_crypto_parameters {

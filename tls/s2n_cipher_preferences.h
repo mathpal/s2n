@@ -27,6 +27,8 @@ struct s2n_cipher_preferences {
     bool allow_chacha20_boosting;
 };
 
+extern const struct s2n_cipher_preferences cipher_preferences_20230317;
+extern const struct s2n_cipher_preferences cipher_preferences_20240331;
 extern const struct s2n_cipher_preferences cipher_preferences_20140601;
 extern const struct s2n_cipher_preferences cipher_preferences_20141001;
 extern const struct s2n_cipher_preferences cipher_preferences_20150202;
@@ -54,6 +56,9 @@ extern const struct s2n_cipher_preferences cipher_preferences_20210816_gcm;
 extern const struct s2n_cipher_preferences cipher_preferences_20210825;
 extern const struct s2n_cipher_preferences cipher_preferences_20210825_gcm;
 extern const struct s2n_cipher_preferences cipher_preferences_20210831;
+extern const struct s2n_cipher_preferences cipher_preferences_20231213;
+extern const struct s2n_cipher_preferences cipher_preferences_20231214;
+
 extern const struct s2n_cipher_preferences cipher_preferences_default_fips;
 
 extern const struct s2n_cipher_preferences cipher_preferences_test_all;
@@ -127,5 +132,6 @@ extern const struct s2n_cipher_preferences cipher_preferences_pq_tls_1_0_2021_05
 extern const struct s2n_cipher_preferences cipher_preferences_pq_tls_1_0_2021_05_24;
 extern const struct s2n_cipher_preferences cipher_preferences_pq_tls_1_0_2021_05_25;
 extern const struct s2n_cipher_preferences cipher_preferences_pq_tls_1_0_2021_05_26;
+extern const struct s2n_cipher_preferences cipher_preferences_pq_tls_1_3_2023_06_01;
 
 extern const struct s2n_cipher_preferences cipher_preferences_null;

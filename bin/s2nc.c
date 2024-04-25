@@ -45,6 +45,10 @@
 #define OPT_PREFER_THROUGHPUT  1006
 #define OPT_BUFFERED_SEND      1007
 
+/*
+ * s2nc is an example client that uses many s2n-tls APIs.
+ * It is intended for testing purposes only, and should not be used in production.
+ */
 void usage()
 {
     /* clang-format off */
@@ -57,7 +61,7 @@ void usage()
     fprintf(stderr, "    Sets the application protocols supported by this client, as a comma separated list.\n");
     fprintf(stderr, "  -c [version_string]\n");
     fprintf(stderr, "  --ciphers [version_string]\n");
-    fprintf(stderr, "    Set the cipher preference version string. Defaults to \"default\". See USAGE-GUIDE.md\n");
+    fprintf(stderr, "    Set the cipher preference version string. Defaults to \"default\" \n");
     fprintf(stderr, "  --enter-fips-mode\n");
     fprintf(stderr, "    Enter libcrypto's FIPS mode. The linked version of OpenSSL must be built with the FIPS module.\n");
     fprintf(stderr, "  -e,--echo\n");
@@ -274,8 +278,8 @@ static void setup_s2n_config(struct s2n_config *config, const char *cipher_prefs
 
 int main(int argc, char *const *argv)
 {
-    struct addrinfo hints, *ai_list, *ai;
-    int r, sockfd = 0;
+    struct addrinfo hints, *ai_list = NULL, *ai = NULL;
+    int r = 0, sockfd = 0;
     bool session_ticket_recv = 0;
     /* Optional args */
     const char *alpn_protocols = NULL;

@@ -92,7 +92,7 @@ impl PrivateKeyOperation {
     /// Sets the output of the operation
     pub fn set_output(self, conn: &mut Connection, buf: &[u8]) -> Result<(), Error> {
         let buf_len: u32 = buf.len().try_into().map_err(|_| Error::INVALID_INPUT)?;
-        let buf_ptr = buf.as_ptr() as *const u8;
+        let buf_ptr = buf.as_ptr();
         unsafe {
             s2n_async_pkey_op_set_output(self.raw.as_ptr(), buf_ptr, buf_len).into_result()?;
             s2n_async_pkey_op_apply(self.raw.as_ptr(), conn.as_ptr()).into_result()?;
@@ -109,7 +109,7 @@ impl Drop for PrivateKeyOperation {
     }
 }
 
-pub trait PrivateKeyCallback {
+pub trait PrivateKeyCallback: 'static + Send + Sync {
     fn handle_operation(
         &self,
         connection: &mut Connection,
@@ -128,7 +128,6 @@ mod tests {
     use futures_test::task::new_count_waker;
     use openssl::{ec::EcKey, ecdsa::EcdsaSig};
 
-    const MAX_POLLS: usize = 100;
     type Error = Box<dyn std::error::Error>;
 
     const KEY: &[u8] = include_bytes!(concat!(
@@ -171,7 +170,7 @@ mod tests {
             Harness::new(client)
         };
 
-        Ok(Pair::new(server, client, MAX_POLLS))
+        Ok(Pair::new(server, client))
     }
 
     fn ecdsa_sign(
@@ -303,11 +302,11 @@ mod tests {
         let (waker, wake_count) = new_count_waker();
         let counter = testing::Counter::default();
         let callback = TestPkeyCallback(counter.clone());
-        let pair = new_pair(callback, waker)?;
+        let mut pair = new_pair(callback, waker)?;
 
         assert_eq!(counter.count(), 0);
         assert_eq!(wake_count, 0);
-        let result = poll_tls_pair_result(pair);
+        let result = poll_tls_pair_result(&mut pair);
         assert_eq!(counter.count(), 1);
         assert_eq!(wake_count, 0);
 
@@ -359,11 +358,11 @@ mod tests {
         let (waker, wake_count) = new_count_waker();
         let counter = testing::Counter::default();
         let callback = TestPkeyCallback(counter.clone());
-        let pair = new_pair(callback, waker)?;
+        let mut pair = new_pair(callback, waker)?;
 
         assert_eq!(counter.count(), 0);
         assert_eq!(wake_count, 0);
-        let result = poll_tls_pair_result(pair);
+        let result = poll_tls_pair_result(&mut pair);
         assert_eq!(counter.count(), 1);
         assert_eq!(wake_count, POLL_COUNT);
 

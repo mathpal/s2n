@@ -161,7 +161,7 @@ int main(int argc, char **argv)
     EXPECT_SUCCESS(s2n_disable_tls13_in_test());
 
     /* Load the RSA cert */
-    struct s2n_cert_chain_and_key *rsa_cert_chain;
+    struct s2n_cert_chain_and_key *rsa_cert_chain = NULL;
     EXPECT_SUCCESS(s2n_test_cert_chain_and_key_new(&rsa_cert_chain,
             S2N_RSA_2048_PKCS1_CERT_CHAIN, S2N_RSA_2048_PKCS1_KEY));
 
@@ -175,7 +175,7 @@ int main(int argc, char **argv)
     {
         struct s2n_pkey rsa_public_key;
         s2n_pkey_type rsa_pkey_type;
-        EXPECT_SUCCESS(s2n_asn1der_to_public_key_and_type(&rsa_public_key, &rsa_pkey_type, &rsa_cert_chain->cert_chain->head->raw));
+        EXPECT_OK(s2n_asn1der_to_public_key_and_type(&rsa_public_key, &rsa_pkey_type, &rsa_cert_chain->cert_chain->head->raw));
         EXPECT_EQUAL(rsa_pkey_type, S2N_PKEY_TYPE_RSA);
 
         hash_state_new(sign_hash, random_msg);
@@ -198,7 +198,7 @@ int main(int argc, char **argv)
 
 #if RSA_PSS_CERTS_SUPPORTED
 
-    struct s2n_cert_chain_and_key *rsa_pss_cert_chain;
+    struct s2n_cert_chain_and_key *rsa_pss_cert_chain = NULL;
     EXPECT_SUCCESS(s2n_test_cert_chain_and_key_new(&rsa_pss_cert_chain,
             S2N_RSA_PSS_2048_SHA256_LEAF_CERT, S2N_RSA_PSS_2048_SHA256_LEAF_KEY));
 
@@ -206,7 +206,7 @@ int main(int argc, char **argv)
     {
         struct s2n_pkey rsa_public_key;
         s2n_pkey_type rsa_pkey_type;
-        EXPECT_SUCCESS(s2n_asn1der_to_public_key_and_type(&rsa_public_key, &rsa_pkey_type, &rsa_cert_chain->cert_chain->head->raw));
+        EXPECT_OK(s2n_asn1der_to_public_key_and_type(&rsa_public_key, &rsa_pkey_type, &rsa_cert_chain->cert_chain->head->raw));
         EXPECT_EQUAL(rsa_pkey_type, S2N_PKEY_TYPE_RSA);
 
         /* Test: RSA cert can sign/verify with PSS */
@@ -243,7 +243,7 @@ int main(int argc, char **argv)
         {
             struct s2n_pkey rsa_pss_public_key;
             s2n_pkey_type rsa_pss_pkey_type;
-            EXPECT_SUCCESS(s2n_asn1der_to_public_key_and_type(&rsa_pss_public_key, &rsa_pss_pkey_type, &rsa_pss_cert_chain->cert_chain->head->raw));
+            EXPECT_OK(s2n_asn1der_to_public_key_and_type(&rsa_pss_public_key, &rsa_pss_pkey_type, &rsa_pss_cert_chain->cert_chain->head->raw));
             EXPECT_EQUAL(rsa_pss_pkey_type, S2N_PKEY_TYPE_RSA_PSS);
 
             /* Set the keys equal. */
@@ -281,7 +281,7 @@ int main(int argc, char **argv)
 
         struct s2n_pkey rsa_public_key = { 0 };
         s2n_pkey_type rsa_pkey_type = 0;
-        EXPECT_SUCCESS(s2n_asn1der_to_public_key_and_type(&rsa_public_key, &rsa_pkey_type,
+        EXPECT_OK(s2n_asn1der_to_public_key_and_type(&rsa_public_key, &rsa_pkey_type,
                 &rsa_cert_chain->cert_chain->head->raw));
         EXPECT_EQUAL(rsa_pkey_type, S2N_PKEY_TYPE_RSA);
 

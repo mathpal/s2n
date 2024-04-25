@@ -34,7 +34,7 @@
  */
 static const BIGNUM *s2n_get_Ys_dh_param(struct s2n_dh_params *dh_params)
 {
-    const BIGNUM *Ys;
+    const BIGNUM *Ys = NULL;
 
 /* DH made opaque in Openssl 1.1.0 */
 #if S2N_OPENSSL_VERSION_AT_LEAST(1, 1, 0)
@@ -48,7 +48,7 @@ static const BIGNUM *s2n_get_Ys_dh_param(struct s2n_dh_params *dh_params)
 
 static const BIGNUM *s2n_get_p_dh_param(struct s2n_dh_params *dh_params)
 {
-    const BIGNUM *p;
+    const BIGNUM *p = NULL;
 #if S2N_OPENSSL_VERSION_AT_LEAST(1, 1, 0)
     DH_get0_pqg(dh_params->dh, &p, NULL, NULL);
 #else
@@ -60,7 +60,7 @@ static const BIGNUM *s2n_get_p_dh_param(struct s2n_dh_params *dh_params)
 
 static const BIGNUM *s2n_get_g_dh_param(struct s2n_dh_params *dh_params)
 {
-    const BIGNUM *g;
+    const BIGNUM *g = NULL;
 #if S2N_OPENSSL_VERSION_AT_LEAST(1, 1, 0)
     DH_get0_pqg(dh_params->dh, NULL, NULL, &g);
 #else
@@ -138,24 +138,29 @@ int s2n_pkcs3_to_dh_params(struct s2n_dh_params *dh_params, struct s2n_blob *pkc
 {
     POSIX_ENSURE_REF(dh_params);
     POSIX_PRECONDITION(s2n_blob_validate(pkcs3));
+    DEFER_CLEANUP(struct s2n_dh_params temp_dh_params = { 0 }, s2n_dh_params_free);
 
     uint8_t *original_ptr = pkcs3->data;
-    dh_params->dh = d2i_DHparams(NULL, (const unsigned char **) (void *) &pkcs3->data, pkcs3->size);
-    POSIX_GUARD(s2n_check_p_g_dh_params(dh_params));
-    if (pkcs3->data && (pkcs3->data - original_ptr != pkcs3->size)) {
-        DH_free(dh_params->dh);
-        POSIX_BAIL(S2N_ERR_INVALID_PKCS3);
+    temp_dh_params.dh = d2i_DHparams(NULL, (const unsigned char **) (void *) &pkcs3->data, pkcs3->size);
+
+    POSIX_GUARD(s2n_check_p_g_dh_params(&temp_dh_params));
+
+    if (pkcs3->data) {
+        POSIX_ENSURE_GTE(pkcs3->data, original_ptr);
+        POSIX_ENSURE((uint32_t) (pkcs3->data - original_ptr) == pkcs3->size, S2N_ERR_INVALID_PKCS3);
     }
+
     pkcs3->data = original_ptr;
 
     /* Require at least 2048 bits for the DH size */
-    if (DH_size(dh_params->dh) < S2N_MIN_DH_PRIME_SIZE_BYTES) {
-        DH_free(dh_params->dh);
-        POSIX_BAIL(S2N_ERR_DH_TOO_SMALL);
-    }
+    POSIX_ENSURE(DH_size(temp_dh_params.dh) >= S2N_MIN_DH_PRIME_SIZE_BYTES, S2N_ERR_DH_TOO_SMALL);
 
     /* Check the generator and prime */
-    POSIX_GUARD(s2n_dh_params_check(dh_params));
+    POSIX_GUARD(s2n_dh_params_check(&temp_dh_params));
+
+    dh_params->dh = temp_dh_params.dh;
+
+    ZERO_TO_DISABLE_DEFER_CLEANUP(temp_dh_params);
 
     return S2N_SUCCESS;
 }

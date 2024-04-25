@@ -14,6 +14,7 @@
  */
 
 #include <errno.h>
+#include <inttypes.h>
 #include <netdb.h>
 #include <openssl/rsa.h>
 #include <openssl/x509.h>
@@ -138,10 +139,10 @@ int early_data_send(struct s2n_connection *conn, uint8_t *data, uint32_t len)
 
 int print_connection_info(struct s2n_connection *conn)
 {
-    int client_hello_version;
-    int client_protocol_version;
-    int server_protocol_version;
-    int actual_protocol_version;
+    int client_hello_version = 0;
+    int client_protocol_version = 0;
+    int server_protocol_version = 0;
+    int actual_protocol_version = 0;
 
     if ((client_hello_version = s2n_connection_get_client_hello_version(conn)) < 0) {
         fprintf(stderr, "Could not get client hello version\n");
@@ -178,7 +179,7 @@ int print_connection_info(struct s2n_connection *conn)
     printf("KEM: %s\n", s2n_connection_get_kem_name(conn));
     printf("KEM Group: %s\n", s2n_connection_get_kem_group_name(conn));
 
-    uint32_t length;
+    uint32_t length = 0;
     const uint8_t *status = s2n_connection_get_ocsp_response(conn, &length);
     if (status && length > 0) {
         printf("OCSP response received, length %u\n", length);
@@ -212,7 +213,7 @@ int print_connection_info(struct s2n_connection *conn)
         uint8_t *identity = (uint8_t *) malloc(identity_length);
         GUARD_EXIT_NULL(identity);
         GUARD_EXIT(s2n_connection_get_negotiated_psk_identity(conn, identity, identity_length), "Error getting negotiated psk identity from the connection\n");
-        printf("Negotiated PSK identity: %s\n", identity);
+        printf("Negotiated PSK identity: %.*s\n", identity_length, identity);
         free(identity);
     }
 
@@ -250,6 +251,9 @@ int print_connection_info(struct s2n_connection *conn)
         printf("\n");
     }
 
+    printf("Wire bytes in: %" PRIu64 "\n", s2n_connection_get_wire_bytes_in(conn));
+    printf("Wire bytes out: %" PRIu64 "\n", s2n_connection_get_wire_bytes_out(conn));
+
     return 0;
 }
 
@@ -261,8 +265,10 @@ int negotiate(struct s2n_connection *conn, int fd)
             fprintf(stderr, "Failed to negotiate: '%s'. %s\n",
                     s2n_strerror(s2n_errno, "EN"),
                     s2n_strerror_debug(s2n_errno, "EN"));
-            fprintf(stderr, "Alert: %d\n",
-                    s2n_connection_get_alert(conn));
+            if (s2n_error_get_type(s2n_errno) == S2N_ERR_T_ALERT) {
+                fprintf(stderr, "Alert: %d\n",
+                        s2n_connection_get_alert(conn));
+            }
             S2N_ERROR_PRESERVE_ERRNO();
         }
 
@@ -375,12 +381,17 @@ int echo(struct s2n_connection *conn, int sockfd, bool *stop_echo)
                     return 0;
                 }
                 if (bytes_read < 0) {
-                    if (s2n_error_get_type(s2n_errno) == S2N_ERR_T_BLOCKED) {
-                        /* Wait until poll tells us data is ready */
-                        continue;
+                    switch (s2n_error_get_type(s2n_errno)) {
+                        case S2N_ERR_T_BLOCKED:
+                            /* Wait until poll tells us data is ready */
+                            continue;
+                        case S2N_ERR_T_ALERT:
+                            fprintf(stderr, "Received alert: %d\n", s2n_connection_get_alert(conn));
+                            break;
+                        default:
+                            fprintf(stderr, "Error reading from connection: '%s'\n", s2n_strerror(s2n_errno, "EN"));
+                            break;
                     }
-
-                    fprintf(stderr, "Error reading from connection: '%s' %d\n", s2n_strerror(s2n_errno, "EN"), s2n_connection_get_alert(conn));
                     exit(1);
                 }
 

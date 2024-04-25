@@ -203,14 +203,11 @@ int s2n_stuffer_reread(struct s2n_stuffer *stuffer)
 int s2n_stuffer_wipe_n(struct s2n_stuffer *stuffer, const uint32_t size)
 {
     POSIX_PRECONDITION(s2n_stuffer_validate(stuffer));
-    if (size >= stuffer->write_cursor) {
-        return s2n_stuffer_wipe(stuffer);
-    }
+    uint32_t wipe_size = MIN(size, stuffer->write_cursor);
 
-    /* We know that size is now less than write_cursor */
-    stuffer->write_cursor -= size;
-    POSIX_CHECKED_MEMSET(stuffer->blob.data + stuffer->write_cursor, S2N_WIPE_PATTERN, size);
+    stuffer->write_cursor -= wipe_size;
     stuffer->read_cursor = MIN(stuffer->read_cursor, stuffer->write_cursor);
+    POSIX_CHECKED_MEMSET(stuffer->blob.data + stuffer->write_cursor, S2N_WIPE_PATTERN, wipe_size);
 
     POSIX_POSTCONDITION(s2n_stuffer_validate(stuffer));
     return S2N_SUCCESS;
@@ -218,7 +215,7 @@ int s2n_stuffer_wipe_n(struct s2n_stuffer *stuffer, const uint32_t size)
 
 bool s2n_stuffer_is_consumed(struct s2n_stuffer *stuffer)
 {
-    return stuffer && (stuffer->read_cursor == stuffer->write_cursor);
+    return stuffer && (stuffer->read_cursor == stuffer->write_cursor) && !stuffer->tainted;
 }
 
 int s2n_stuffer_wipe(struct s2n_stuffer *stuffer)
@@ -433,5 +430,17 @@ int s2n_stuffer_extract_blob(struct s2n_stuffer *stuffer, struct s2n_blob *out)
     }
 
     POSIX_POSTCONDITION(s2n_blob_validate(out));
+    return S2N_SUCCESS;
+}
+
+int s2n_stuffer_shift(struct s2n_stuffer *stuffer)
+{
+    POSIX_ENSURE_REF(stuffer);
+    struct s2n_stuffer copy = *stuffer;
+    POSIX_GUARD(s2n_stuffer_rewrite(&copy));
+    uint8_t *data = stuffer->blob.data + stuffer->read_cursor;
+    uint32_t data_size = s2n_stuffer_data_available(stuffer);
+    POSIX_GUARD(s2n_stuffer_write_bytes(&copy, data, data_size));
+    *stuffer = copy;
     return S2N_SUCCESS;
 }

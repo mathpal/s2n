@@ -33,6 +33,7 @@ async fn handshake_basic() -> Result<(), Box<dyn std::error::Error>> {
         assert!(tls.as_ref().handshake_type()?.contains("NEGOTIATED"));
         // Cipher suite may change, so just makes sure we can retrieve it.
         assert!(tls.as_ref().cipher_suite().is_ok());
+        assert!(tls.as_ref().selected_curve().is_ok());
     }
 
     Ok(())
@@ -162,26 +163,35 @@ async fn handshake_error_with_blinding() -> Result<(), Box<dyn std::error::Error
 
     let client = TlsConnector::new(client_config.clone());
     let server = TlsAcceptor::new(server_config.clone());
+    let (server_stream, client_stream) = common::get_streams().await?;
+
+    let time_start = time::Instant::now();
+    let result = common::run_negotiate(&client, client_stream, &server, server_stream).await;
+    let time_elapsed = time_start.elapsed();
 
     // Handshake MUST NOT finish faster than minimal blinding time.
-    let (server_stream, client_stream) = common::get_streams().await?;
-    let timeout = time::timeout(
-        common::MIN_BLINDING_SECS,
-        common::run_negotiate(&client, client_stream, &server, server_stream),
-    )
-    .await;
-    assert!(timeout.is_err());
+    assert!(time_elapsed > common::MIN_BLINDING_SECS);
 
-    // Handshake MUST eventually gracefully close after blinding
+    // Handshake MUST eventually gracefully fail after blinding
+    let error = result.unwrap_err();
+    assert_eq!(error.kind(), ErrorType::ProtocolError);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn io_stream_access() -> Result<(), Box<dyn std::error::Error>> {
     let (server_stream, client_stream) = common::get_streams().await?;
-    let timeout = time::timeout(
-        common::MAX_BLINDING_SECS.mul_f32(1.1),
-        common::run_negotiate(&client, client_stream, &server, server_stream),
-    )
-    .await;
-    let result = timeout?;
-    assert!(result.is_err());
-    assert_eq!(result.unwrap_err().kind(), ErrorType::ProtocolError);
+
+    let client_addr = client_stream.local_addr().unwrap();
+    let client = TlsConnector::new(common::client_config()?.build()?);
+    let server = TlsAcceptor::new(common::server_config()?.build()?);
+
+    let (mut client_result, _server_result) =
+        common::run_negotiate(&client, client_stream, &server, server_stream).await?;
+
+    assert_eq!(client_result.get_ref().local_addr().unwrap(), client_addr);
+    assert_eq!(client_result.get_mut().local_addr().unwrap(), client_addr);
 
     Ok(())
 }

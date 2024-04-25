@@ -2,21 +2,56 @@
   description = "A flake for s2n-tls";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-22.11";
+  # TODO: https://github.com/aws/aws-lc/pull/830
+  inputs.awslc.url = "github:dougch/aws-lc?ref=nix";
 
-  outputs = { self, nix, nixpkgs, flake-utils }:
+  outputs = { self, nix, nixpkgs, awslc, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        # TODO: We have parts of our CI that rely on clang-format-15, but that is only avalible on github:nixos/nixpkgs/nixos-unstable
+        aws-lc = awslc.packages.${system}.aws-lc;
+        # TODO: submit a flake PR
+        corretto = import nix/amazon-corretto-17.nix { pkgs = pkgs; };
+        # TODO: We have parts of our CI that rely on clang-format-15, but that is only available on github:nixos/nixpkgs/nixos-unstable
         llvmPkgs = pkgs.llvmPackages_14;
         pythonEnv = import ./nix/pyenv.nix { pkgs = pkgs; };
-        openssl_0_9_8 = import ./nix/openssl_0_9_8.nix { pkgs = pkgs; };
+        # Note: we're rebuilding, not importing from nixpkgs for the mkShells.
         openssl_1_0_2 = import ./nix/openssl_1_0_2.nix { pkgs = pkgs; };
         openssl_1_1_1 = import ./nix/openssl_1_1_1.nix { pkgs = pkgs; };
         openssl_3_0 = import ./nix/openssl_3_0.nix { pkgs = pkgs; };
         libressl = import ./nix/libressl.nix { pkgs = pkgs; };
-        corretto-8 = import nix/amazon-corretto-8.nix { pkgs = pkgs; };
-        gnutls-3-7 = import nix/gnutls.nix { pkgs = pkgs; };
+        common_packages = [
+          # Integration Deps
+          # We're not including openssl1.1.1 in our package list to avoid confusing cmake.
+          # It will be in the PATH of our devShell for use in tests.
+          pythonEnv
+          pkgs.valgrind
+          corretto
+          pkgs.iproute2
+          pkgs.apacheHttpd
+          # GnuTLS-cli and serv utilities needed for some integration tests.
+          pkgs.gnutls
+
+          # C Compiler Tooling: llvmPkgs.clangUseLLVM -- wrapper to overwrite default compiler with clang
+          llvmPkgs.llvm
+          llvmPkgs.llvm-manpages
+          llvmPkgs.libclang
+          llvmPkgs.clang-manpages
+
+          # Linters/Formatters
+          pkgs.shellcheck
+          pkgs.nixfmt
+          pkgs.python310Packages.pep8
+          pkgs.python310Packages.ipython
+
+          # Rust
+          pkgs.rustup
+
+          # Quality of Life
+          pkgs.findutils
+          pkgs.git
+          pkgs.which
+        ];
         writeScript = path:
           pkgs.writeScript (baseNameOf path) (builtins.readFile path);
       in rec {
@@ -26,7 +61,7 @@
           inherit system;
 
           nativeBuildInputs = [ pkgs.cmake ];
-          buildInputs = [ pkgs.openssl ];
+          buildInputs = [ pkgs.openssl_3 ];
 
           configurePhase = ''
             cmake -S . -B./build \
@@ -47,61 +82,89 @@
             echo Not running tests here. Run `nix develop` to run tests.
           '';
 
-          propagatedBuildInputs = [ pkgs.openssl ];
+          propagatedBuildInputs = [ pkgs.openssl_3 ];
         };
         devShells.default = pkgs.mkShell {
-          # This is a development enviroment shell which should be able to:
+          # This is a development environment shell which should be able to:
           #  - build s2n-tls
           #  - run unit tests
           #  - run integ tests
           #  - do common development operations (e.g. lint, debug, and manage repos)
           inherit system;
+          buildInputs = [ pkgs.cmake openssl_3_0 ];
+          packages = common_packages;
+          S2N_LIBCRYPTO = "openssl-3.0";
+          # Integ s_client/server tests expect openssl 1.1.1.
           shellHook = ''
-            echo Setting up enviornment from flake.nix...
-            export S2N_LIBCRYPTO=openssl-1.1.1
-            export PATH=${openssl_1_1_1}/bin:${gnutls-3-7}/bin:$PATH
-            export PS1="[nix] $PS1"
-            alias openssl-098=${openssl_0_9_8}/bin/openssl
-            alias openssl-102=${openssl_1_0_2}/bin/openssl
-            alias openssl-30=${openssl_3_0}/bin/openssl
+            echo Setting up $S2N_LIBCRYPTO environment from flake.nix...
+            export PATH=${openssl_1_1_1}/bin:$PATH
+            export PS1="[nix $S2N_LIBCRYPTO] $PS1"
             source ${writeScript ./nix/shell.sh}
           '';
-          packages = [
-            # Build Depends
-            openssl_1_1_1
-            pkgs.cmake
-            # Other Libcryptos
-            openssl_0_9_8
-            openssl_1_0_2
-            openssl_3_0
-            libressl
-            pkgs.boringssl
-
-            # Integration Deps
-            pythonEnv
-            corretto-8
-            gnutls-3-7
-
-            # C Compiler Tooling: llvmPkgs.clangUseLLVM -- wrapper to overwrite default compiler with clang
-            llvmPkgs.llvm
-            llvmPkgs.llvm-manpages
-            llvmPkgs.libclang
-            llvmPkgs.clang-manpages
-
-            # Linters/Formatters
-            pkgs.shellcheck
-            pkgs.nixfmt
-            pkgs.python39Packages.pep8
-
-            # Rust
-            pkgs.rustup
-
-            # Quality of Life
-            pkgs.findutils
-            pkgs.git
-            pkgs.which
-          ];
         };
+
+        devShells.openssl111 = devShells.default.overrideAttrs
+          (finalAttrs: previousAttrs: {
+            # Re-include cmake to update the environment with a new libcrypto.
+            buildInputs = [ pkgs.cmake openssl_1_1_1 ];
+            S2N_LIBCRYPTO = "openssl-1.1.1";
+            # Integ s_client/server tests expect openssl 1.1.1.
+            # GnuTLS-cli and serv utilities needed for some integration tests.
+            shellHook = ''
+              echo Setting up $S2N_LIBCRYPTO environment from flake.nix...
+              export PATH=${openssl_1_1_1}/bin:$PATH
+              export PS1="[nix $S2N_LIBCRYPTO] $PS1"
+              source ${writeScript ./nix/shell.sh}
+            '';
+          });
+
+        devShells.libressl = devShells.default.overrideAttrs
+          (finalAttrs: previousAttrs: {
+            # Re-include cmake to update the environment with a new libcrypto.
+            buildInputs = [ pkgs.cmake libressl ];
+            S2N_LIBCRYPTO = "libressl";
+            # Integ s_client/server tests expect openssl 1.1.1.
+            # GnuTLS-cli and serv utilities needed for some integration tests.
+            shellHook = ''
+              echo Setting up $S2N_LIBCRYPTO environment from flake.nix...
+              export PATH=${openssl_1_1_1}/bin:$PATH
+              export PS1="[nix $S2N_LIBCRYPTO] $PS1"
+              source ${writeScript ./nix/shell.sh}
+            '';
+          });
+
+        devShells.openssl102 = devShells.default.overrideAttrs
+          (finalAttrs: previousAttrs: {
+            # Re-include cmake to update the environment with a new libcrypto.
+            buildInputs = [ pkgs.cmake openssl_1_0_2 ];
+            S2N_LIBCRYPTO = "openssl-1.0.2";
+            # Integ s_client/server tests expect openssl 1.1.1.
+            # GnuTLS-cli and serv utilities needed for some integration tests.
+            shellHook = ''
+              echo Setting up $S2N_LIBCRYPTO enviornment from flake.nix...
+              export PATH=${openssl_1_1_1}/bin:$PATH
+              export PS1="[nix $S2N_LIBCRYPTO] $PS1"
+              source ${writeScript ./nix/shell.sh}
+            '';
+          });
+
+        devShells.awslc = devShells.default.overrideAttrs
+          (finalAttrs: previousAttrs: {
+            # Re-include cmake to update the environment with a new libcrypto.
+            buildInputs = [ pkgs.cmake aws-lc ];
+            S2N_LIBCRYPTO = "awslc";
+            # Integ s_client/server tests expect openssl 1.1.1.
+            # GnuTLS-cli and serv utilities needed for some integration tests.
+            shellHook = ''
+              echo Setting up $S2N_LIBCRYPTO environment from flake.nix...
+              export PATH=${openssl_1_1_1}/bin:$PATH
+              export PS1="[nix $S2N_LIBCRYPTO] $PS1"
+              source ${writeScript ./nix/shell.sh}
+            '';
+          });
+
+        # Used to backup the devShell to s3 for caching.
+        packages.devShell = devShells.default.inputDerivation;
         packages.default = packages.s2n-tls;
         packages.s2n-tls-openssl3 = packages.s2n-tls.overrideAttrs
           (finalAttrs: previousAttrs: { doCheck = true; });

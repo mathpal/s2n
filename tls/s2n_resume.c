@@ -43,13 +43,30 @@ int s2n_allowed_to_cache_connection(struct s2n_connection *conn)
     return config->use_session_cache;
 }
 
+/* If a protocol version is required before the actual_protocol_version
+ * is negotiated, we should fall back to resume_protocol_version if available.
+ *
+ * This covers the case where the application requests a ticket / session state
+ * before a NewSessionTicket message has been sent or received. Historically,
+ * in that case we return the ticket / session state already set for the connection.
+ * resume_protocol_version represents the protocol version of that existing ticket / state.
+ */
+static uint8_t s2n_resume_protocol_version(struct s2n_connection *conn)
+{
+    if (!IS_NEGOTIATED(conn) && conn->resume_protocol_version) {
+        return conn->resume_protocol_version;
+    } else {
+        return conn->actual_protocol_version;
+    }
+}
+
 static int s2n_tls12_serialize_resumption_state(struct s2n_connection *conn, struct s2n_stuffer *to)
 {
     POSIX_ENSURE_REF(to);
     POSIX_ENSURE_REF(conn);
     POSIX_ENSURE_REF(conn->secure);
 
-    uint64_t now;
+    uint64_t now = 0;
 
     S2N_ERROR_IF(s2n_stuffer_space_remaining(to) < S2N_TLS12_STATE_SIZE_IN_BYTES, S2N_ERR_STUFFER_IS_FULL);
 
@@ -58,10 +75,10 @@ static int s2n_tls12_serialize_resumption_state(struct s2n_connection *conn, str
 
     /* Write the entry */
     POSIX_GUARD(s2n_stuffer_write_uint8(to, S2N_SERIALIZED_FORMAT_TLS12_V3));
-    POSIX_GUARD(s2n_stuffer_write_uint8(to, conn->actual_protocol_version));
+    POSIX_GUARD(s2n_stuffer_write_uint8(to, s2n_resume_protocol_version(conn)));
     POSIX_GUARD(s2n_stuffer_write_bytes(to, conn->secure->cipher_suite->iana_value, S2N_TLS_CIPHER_SUITE_LEN));
     POSIX_GUARD(s2n_stuffer_write_uint64(to, now));
-    POSIX_GUARD(s2n_stuffer_write_bytes(to, conn->secrets.tls12.master_secret, S2N_TLS_SECRET_LEN));
+    POSIX_GUARD(s2n_stuffer_write_bytes(to, conn->secrets.version.tls12.master_secret, S2N_TLS_SECRET_LEN));
     POSIX_GUARD(s2n_stuffer_write_uint8(to, conn->ems_negotiated));
 
     return S2N_SUCCESS;
@@ -105,7 +122,7 @@ static S2N_RESULT s2n_tls13_serialize_resumption_state(struct s2n_connection *co
     RESULT_GUARD_POSIX(s2n_stuffer_write_bytes(out, conn->secure->cipher_suite->iana_value, S2N_TLS_CIPHER_SUITE_LEN));
     RESULT_GUARD_POSIX(s2n_stuffer_write_uint64(out, current_time));
     RESULT_GUARD_POSIX(s2n_stuffer_write_uint32(out, ticket_fields->ticket_age_add));
-    RESULT_ENSURE_LTE(ticket_fields->session_secret.size, UINT8_MAX);
+    RESULT_ENSURE_INCLUSIVE_RANGE(1, ticket_fields->session_secret.size, UINT8_MAX);
     RESULT_GUARD_POSIX(s2n_stuffer_write_uint8(out, ticket_fields->session_secret.size));
     RESULT_GUARD_POSIX(s2n_stuffer_write_bytes(out, ticket_fields->session_secret.data, ticket_fields->session_secret.size));
     RESULT_GUARD(s2n_tls13_serialize_keying_material_expiration(conn, current_time, out));
@@ -126,7 +143,7 @@ static S2N_RESULT s2n_tls13_serialize_resumption_state(struct s2n_connection *co
 
 static S2N_RESULT s2n_serialize_resumption_state(struct s2n_connection *conn, struct s2n_stuffer *out)
 {
-    if (conn->actual_protocol_version < S2N_TLS13) {
+    if (s2n_resume_protocol_version(conn) < S2N_TLS13) {
         RESULT_GUARD_POSIX(s2n_tls12_serialize_resumption_state(conn, out));
     } else {
         RESULT_GUARD(s2n_tls13_serialize_resumption_state(conn, out));
@@ -150,15 +167,15 @@ static int s2n_tls12_deserialize_resumption_state(struct s2n_connection *conn, s
     POSIX_GUARD(s2n_stuffer_read_bytes(from, cipher_suite, S2N_TLS_CIPHER_SUITE_LEN));
     S2N_ERROR_IF(memcmp(conn->secure->cipher_suite->iana_value, cipher_suite, S2N_TLS_CIPHER_SUITE_LEN), S2N_ERR_INVALID_SERIALIZED_SESSION_STATE);
 
-    uint64_t now;
+    uint64_t now = 0;
     POSIX_GUARD_RESULT(s2n_config_wall_clock(conn->config, &now));
 
-    uint64_t then;
+    uint64_t then = 0;
     POSIX_GUARD(s2n_stuffer_read_uint64(from, &then));
     S2N_ERROR_IF(then > now, S2N_ERR_INVALID_SERIALIZED_SESSION_STATE);
     S2N_ERROR_IF(now - then > conn->config->session_state_lifetime_in_nanos, S2N_ERR_INVALID_SERIALIZED_SESSION_STATE);
 
-    POSIX_GUARD(s2n_stuffer_read_bytes(from, conn->secrets.tls12.master_secret, S2N_TLS_SECRET_LEN));
+    POSIX_GUARD(s2n_stuffer_read_bytes(from, conn->secrets.version.tls12.master_secret, S2N_TLS_SECRET_LEN));
 
     if (s2n_stuffer_data_available(from)) {
         uint8_t ems_negotiated = 0;
@@ -211,27 +228,53 @@ static int s2n_client_serialize_resumption_state(struct s2n_connection *conn, st
     return 0;
 }
 
-static S2N_RESULT s2n_tls12_client_deserialize_session_state(struct s2n_connection *conn, struct s2n_stuffer *from)
+static S2N_RESULT s2n_tls12_client_deserialize_session_state(struct s2n_connection *conn,
+        struct s2n_blob *ticket, struct s2n_stuffer *from)
 {
     RESULT_ENSURE_REF(conn);
     RESULT_ENSURE_REF(from);
 
-    RESULT_GUARD_POSIX(s2n_stuffer_read_uint8(from, &conn->actual_protocol_version));
+    /* Operate on a copy of the connection to avoid mutating the connection on
+     * failure. We have tests in s2n_resume_test.c that prove this level of copy
+     * is sufficient.
+     */
+    struct s2n_crypto_parameters *secure = conn->secure;
+    RESULT_ENSURE_REF(secure);
+    struct s2n_connection temp_conn = *conn;
+    struct s2n_crypto_parameters temp_secure = *secure;
+    temp_conn.secure = &temp_secure;
+
+    RESULT_GUARD_POSIX(s2n_stuffer_read_uint8(from, &temp_conn.resume_protocol_version));
 
     uint8_t *cipher_suite_wire = s2n_stuffer_raw_read(from, S2N_TLS_CIPHER_SUITE_LEN);
     RESULT_ENSURE_REF(cipher_suite_wire);
-    RESULT_GUARD_POSIX(s2n_set_cipher_as_client(conn, cipher_suite_wire));
+    RESULT_GUARD_POSIX(s2n_set_cipher_as_client(&temp_conn, cipher_suite_wire));
 
     uint64_t then = 0;
     RESULT_GUARD_POSIX(s2n_stuffer_read_uint64(from, &then));
 
-    RESULT_GUARD_POSIX(s2n_stuffer_read_bytes(from, conn->secrets.tls12.master_secret, S2N_TLS_SECRET_LEN));
+    RESULT_GUARD_POSIX(s2n_stuffer_read_bytes(from, temp_conn.secrets.version.tls12.master_secret,
+            S2N_TLS_SECRET_LEN));
 
     if (s2n_stuffer_data_available(from)) {
         uint8_t ems_negotiated = 0;
         RESULT_GUARD_POSIX(s2n_stuffer_read_uint8(from, &ems_negotiated));
-        conn->ems_negotiated = ems_negotiated;
+        temp_conn.ems_negotiated = ems_negotiated;
     }
+
+    DEFER_CLEANUP(struct s2n_blob client_ticket = { 0 }, s2n_free);
+    if (ticket) {
+        RESULT_GUARD_POSIX(s2n_dup(ticket, &client_ticket));
+    }
+
+    /* Finally, actually update the connection */
+    RESULT_GUARD_POSIX(s2n_free(&conn->client_ticket));
+    *secure = temp_secure;
+    *conn = temp_conn;
+    conn->secure = secure;
+    conn->client_ticket = client_ticket;
+    ZERO_TO_DISABLE_DEFER_CLEANUP(client_ticket);
+
     return S2N_RESULT_OK;
 }
 
@@ -320,7 +363,8 @@ static S2N_RESULT s2n_tls13_deserialize_session_state(struct s2n_connection *con
     return S2N_RESULT_OK;
 }
 
-S2N_RESULT s2n_deserialize_resumption_state(struct s2n_connection *conn, struct s2n_blob *psk_identity, struct s2n_stuffer *from)
+S2N_RESULT s2n_deserialize_resumption_state(struct s2n_connection *conn,
+        struct s2n_blob *ticket, struct s2n_stuffer *from)
 {
     RESULT_ENSURE_REF(conn);
     RESULT_ENSURE_REF(from);
@@ -332,16 +376,10 @@ S2N_RESULT s2n_deserialize_resumption_state(struct s2n_connection *conn, struct 
         if (conn->mode == S2N_SERVER) {
             RESULT_GUARD_POSIX(s2n_tls12_deserialize_resumption_state(conn, from));
         } else {
-            RESULT_GUARD(s2n_tls12_client_deserialize_session_state(conn, from));
+            RESULT_GUARD(s2n_tls12_client_deserialize_session_state(conn, ticket, from));
         }
     } else if (format == S2N_SERIALIZED_FORMAT_TLS13_V1) {
-        RESULT_GUARD(s2n_tls13_deserialize_session_state(conn, psk_identity, from));
-        if (conn->mode == S2N_CLIENT) {
-            /* Free the client_ticket after setting a psk on the connection.
-             * This prevents s2n_connection_get_session from returning a TLS1.3
-             * ticket before a ticket has been received from the server. */
-            RESULT_GUARD_POSIX(s2n_free(&conn->client_ticket));
-        }
+        RESULT_GUARD(s2n_tls13_deserialize_session_state(conn, ticket, from));
     } else {
         RESULT_BAIL(S2N_ERR_INVALID_SERIALIZED_SESSION_STATE);
     }
@@ -351,7 +389,7 @@ S2N_RESULT s2n_deserialize_resumption_state(struct s2n_connection *conn, struct 
 
 static int s2n_client_deserialize_with_session_id(struct s2n_connection *conn, struct s2n_stuffer *from)
 {
-    uint8_t session_id_len;
+    uint8_t session_id_len = 0;
     POSIX_GUARD(s2n_stuffer_read_uint8(from, &session_id_len));
 
     if (session_id_len == 0 || session_id_len > S2N_TLS_SESSION_ID_MAX_LEN
@@ -369,24 +407,25 @@ static int s2n_client_deserialize_with_session_id(struct s2n_connection *conn, s
 
 static int s2n_client_deserialize_with_session_ticket(struct s2n_connection *conn, struct s2n_stuffer *from)
 {
-    uint16_t session_ticket_len;
+    uint16_t session_ticket_len = 0;
     POSIX_GUARD(s2n_stuffer_read_uint16(from, &session_ticket_len));
 
     if (session_ticket_len == 0 || session_ticket_len > s2n_stuffer_data_available(from)) {
         POSIX_BAIL(S2N_ERR_INVALID_SERIALIZED_SESSION_STATE);
     }
 
-    POSIX_GUARD(s2n_realloc(&conn->client_ticket, session_ticket_len));
-    POSIX_GUARD(s2n_stuffer_read(from, &conn->client_ticket));
+    struct s2n_blob session_ticket = { 0 };
+    uint8_t *session_ticket_bytes = s2n_stuffer_raw_read(from, session_ticket_len);
+    POSIX_ENSURE_REF(session_ticket_bytes);
+    POSIX_GUARD(s2n_blob_init(&session_ticket, session_ticket_bytes, session_ticket_len));
 
-    POSIX_GUARD_RESULT(s2n_deserialize_resumption_state(conn, &conn->client_ticket, from));
-
+    POSIX_GUARD_RESULT(s2n_deserialize_resumption_state(conn, &session_ticket, from));
     return 0;
 }
 
 static int s2n_client_deserialize_resumption_state(struct s2n_connection *conn, struct s2n_stuffer *from)
 {
-    uint8_t format;
+    uint8_t format = 0;
     POSIX_GUARD(s2n_stuffer_read_uint8(from, &format));
 
     switch (format) {
@@ -505,7 +544,7 @@ S2N_RESULT s2n_connection_get_session_state_size(struct s2n_connection *conn, si
     RESULT_ENSURE_REF(conn->secure);
     RESULT_ENSURE_REF(state_size);
 
-    if (conn->actual_protocol_version < S2N_TLS13) {
+    if (s2n_resume_protocol_version(conn) < S2N_TLS13) {
         *state_size = S2N_TLS12_STATE_SIZE_IN_BYTES;
         return S2N_RESULT_OK;
     }
@@ -573,7 +612,7 @@ int s2n_connection_is_ocsp_stapled(struct s2n_connection *conn)
 
 int s2n_config_is_encrypt_decrypt_key_available(struct s2n_config *config)
 {
-    uint64_t now;
+    uint64_t now = 0;
     struct s2n_ticket_key *ticket_key = NULL;
     POSIX_GUARD_RESULT(s2n_config_wall_clock(config, &now));
     POSIX_ENSURE_REF(config->ticket_keys);
@@ -657,7 +696,7 @@ struct s2n_ticket_key *s2n_get_ticket_encrypt_decrypt_key(struct s2n_config *con
     uint8_t encrypt_decrypt_keys_index[S2N_MAX_TICKET_KEYS] = { 0 };
     struct s2n_ticket_key *ticket_key = NULL;
 
-    uint64_t now;
+    uint64_t now = 0;
     PTR_GUARD_RESULT(s2n_config_wall_clock(config, &now));
     PTR_ENSURE_REF(config->ticket_keys);
 
@@ -685,7 +724,7 @@ struct s2n_ticket_key *s2n_get_ticket_encrypt_decrypt_key(struct s2n_config *con
         return ticket_key;
     }
 
-    int8_t idx;
+    int8_t idx = 0;
     PTR_GUARD_POSIX(idx = s2n_compute_weight_of_encrypt_decrypt_keys(config, encrypt_decrypt_keys_index, num_encrypt_decrypt_keys, now));
 
     PTR_GUARD_RESULT(s2n_set_get(config->ticket_keys, idx, (void **) &ticket_key));
@@ -697,7 +736,7 @@ struct s2n_ticket_key *s2n_get_ticket_encrypt_decrypt_key(struct s2n_config *con
  */
 struct s2n_ticket_key *s2n_find_ticket_key(struct s2n_config *config, const uint8_t name[S2N_TICKET_KEY_NAME_LEN])
 {
-    uint64_t now;
+    uint64_t now = 0;
     struct s2n_ticket_key *ticket_key = NULL;
     PTR_GUARD_RESULT(s2n_config_wall_clock(config, &now));
     PTR_ENSURE_REF(config->ticket_keys);
@@ -727,7 +766,7 @@ struct s2n_ticket_key *s2n_find_ticket_key(struct s2n_config *config, const uint
 
 int s2n_encrypt_session_ticket(struct s2n_connection *conn, struct s2n_stuffer *to)
 {
-    struct s2n_ticket_key *key;
+    struct s2n_ticket_key *key = NULL;
     struct s2n_session_key aes_ticket_key = { 0 };
     struct s2n_blob aes_key_blob = { 0 };
 
@@ -781,7 +820,7 @@ int s2n_encrypt_session_ticket(struct s2n_connection *conn, struct s2n_stuffer *
 
 int s2n_decrypt_session_ticket(struct s2n_connection *conn, struct s2n_stuffer *from)
 {
-    struct s2n_ticket_key *key;
+    struct s2n_ticket_key *key = NULL;
     DEFER_CLEANUP(struct s2n_session_key aes_ticket_key = { 0 }, s2n_session_key_free);
     struct s2n_blob aes_key_blob = { 0 };
 
@@ -805,7 +844,7 @@ int s2n_decrypt_session_ticket(struct s2n_connection *conn, struct s2n_stuffer *
 
     POSIX_GUARD(s2n_stuffer_read(from, &iv));
 
-    s2n_blob_init(&aes_key_blob, key->aes_key, S2N_AES256_KEY_LEN);
+    POSIX_GUARD(s2n_blob_init(&aes_key_blob, key->aes_key, S2N_AES256_KEY_LEN));
     POSIX_GUARD(s2n_session_key_alloc(&aes_ticket_key));
     POSIX_GUARD(s2n_aes256_gcm.init(&aes_ticket_key));
     POSIX_GUARD(s2n_aes256_gcm.set_decryption_key(&aes_ticket_key, &aes_key_blob));
@@ -829,7 +868,7 @@ int s2n_decrypt_session_ticket(struct s2n_connection *conn, struct s2n_stuffer *
     POSIX_GUARD(s2n_stuffer_skip_write(&state_stuffer, state_blob_size));
     POSIX_GUARD_RESULT(s2n_deserialize_resumption_state(conn, &from->blob, &state_stuffer));
 
-    uint64_t now;
+    uint64_t now = 0;
     POSIX_GUARD_RESULT(s2n_config_wall_clock(conn->config, &now));
 
     /* If the key is in decrypt-only state, then a new key is assigned
@@ -853,7 +892,7 @@ int s2n_encrypt_session_cache(struct s2n_connection *conn, struct s2n_stuffer *t
 
 int s2n_decrypt_session_cache(struct s2n_connection *conn, struct s2n_stuffer *from)
 {
-    struct s2n_ticket_key *key;
+    struct s2n_ticket_key *key = NULL;
     struct s2n_session_key aes_ticket_key = { 0 };
     struct s2n_blob aes_key_blob = { 0 };
 
@@ -886,7 +925,7 @@ int s2n_decrypt_session_cache(struct s2n_connection *conn, struct s2n_stuffer *f
 
     POSIX_GUARD(s2n_stuffer_read(from, &iv));
 
-    s2n_blob_init(&aes_key_blob, key->aes_key, S2N_AES256_KEY_LEN);
+    POSIX_GUARD(s2n_blob_init(&aes_key_blob, key->aes_key, S2N_AES256_KEY_LEN));
     POSIX_GUARD(s2n_session_key_alloc(&aes_ticket_key));
     POSIX_GUARD(s2n_aes256_gcm.init(&aes_ticket_key));
     POSIX_GUARD(s2n_aes256_gcm.set_decryption_key(&aes_ticket_key, &aes_key_blob));
@@ -923,7 +962,7 @@ int s2n_config_wipe_expired_ticket_crypto_keys(struct s2n_config *config, int8_t
         goto end;
     }
 
-    uint64_t now;
+    uint64_t now = 0;
     POSIX_GUARD_RESULT(s2n_config_wall_clock(config, &now));
     POSIX_ENSURE_REF(config->ticket_keys);
 

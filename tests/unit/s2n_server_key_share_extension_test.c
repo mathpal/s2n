@@ -16,7 +16,7 @@
 #include <stdint.h>
 
 #include "api/s2n.h"
-#include "pq-crypto/s2n_pq.h"
+#include "crypto/s2n_pq.h"
 #include "s2n_test.h"
 #include "stuffer/s2n_stuffer.h"
 #include "testlib/s2n_nist_kats.h"
@@ -81,7 +81,7 @@ int main(int argc, char **argv)
 
     /* Test s2n_extensions_server_key_share_send_size */
     {
-        struct s2n_connection *conn;
+        struct s2n_connection *conn = NULL;
         EXPECT_NOT_NULL(conn = s2n_connection_new(S2N_SERVER));
 
         EXPECT_EQUAL(0, s2n_extensions_server_key_share_send_size(conn));
@@ -200,8 +200,8 @@ int main(int argc, char **argv)
 
         int i = 0;
         do {
-            struct s2n_connection *server_send_conn;
-            struct s2n_connection *client_recv_conn;
+            struct s2n_connection *server_send_conn = NULL;
+            struct s2n_connection *client_recv_conn = NULL;
             EXPECT_NOT_NULL(server_send_conn = s2n_connection_new(S2N_SERVER));
             EXPECT_NOT_NULL(client_recv_conn = s2n_connection_new(S2N_CLIENT));
 
@@ -248,7 +248,7 @@ int main(int argc, char **argv)
 
             for (int i = 0; i < 3; i++) {
                 struct s2n_stuffer extension_stuffer = { 0 };
-                struct s2n_connection *client_conn;
+                struct s2n_connection *client_conn = NULL;
 
                 EXPECT_NOT_NULL(client_conn = s2n_connection_new(S2N_CLIENT));
 
@@ -276,7 +276,7 @@ int main(int argc, char **argv)
              * if tls1.3 not enabled */
             {
                 struct s2n_stuffer extension_stuffer = { 0 };
-                struct s2n_connection *client_conn;
+                struct s2n_connection *client_conn = NULL;
 
                 EXPECT_NOT_NULL(client_conn = s2n_connection_new(S2N_CLIENT));
 
@@ -312,7 +312,7 @@ int main(int argc, char **argv)
         /* Test error handling parsing broken/trancated p256 key share */
         {
             struct s2n_stuffer extension_stuffer = { 0 };
-            struct s2n_connection *client_conn;
+            struct s2n_connection *client_conn = NULL;
 
             EXPECT_NOT_NULL(client_conn = s2n_connection_new(S2N_CLIENT));
             const char *p256 = "001700410474cfd75c0ab7b57247761a277e1c92b5810dacb251bb758f43e9d15aaf292c4a2be43e886425ba55653ebb7a4f32fe368bacce3df00c618645cf1eb6";
@@ -329,7 +329,7 @@ int main(int argc, char **argv)
         /* Test failure for receiving p256 key share for client configured p384 key share */
         {
             struct s2n_stuffer extension_stuffer = { 0 };
-            struct s2n_connection *client_conn;
+            struct s2n_connection *client_conn = NULL;
 
             EXPECT_NOT_NULL(client_conn = s2n_connection_new(S2N_CLIENT));
             const struct s2n_ecc_preferences *ecc_pref = NULL;
@@ -356,7 +356,7 @@ int main(int argc, char **argv)
 
     /* Test Shared Key Generation */
     {
-        struct s2n_connection *client_conn, *server_conn;
+        struct s2n_connection *client_conn = NULL, *server_conn = NULL;
         struct s2n_stuffer key_share_extension = { 0 };
 
         EXPECT_NOT_NULL(client_conn = s2n_connection_new(S2N_CLIENT));
@@ -424,7 +424,7 @@ int main(int argc, char **argv)
 
     /* Test s2n_server_key_share_extension.send with supported curve not in s2n_ecc_preferences list selected */
     if (s2n_is_evp_apis_supported()) {
-        struct s2n_connection *conn;
+        struct s2n_connection *conn = NULL;
         EXPECT_NOT_NULL(conn = s2n_connection_new(S2N_SERVER));
         EXPECT_NOT_NULL(conn->config);
 
@@ -441,7 +441,7 @@ int main(int argc, char **argv)
 
     /* Test s2n_server_key_share_extension.recv with supported curve not in s2n_ecc_preferences list selected  */
     if (s2n_is_evp_apis_supported()) {
-        struct s2n_connection *conn;
+        struct s2n_connection *conn = NULL;
         EXPECT_NOT_NULL(conn = s2n_connection_new(S2N_CLIENT));
         struct s2n_stuffer *extension_stuffer = &conn->handshake.io;
 
@@ -464,8 +464,8 @@ int main(int argc, char **argv)
         /* For a HelloRetryRequest, we won't have a key share. We just have the server selected group/negotiated curve.
          * Test that s2n_server_key_share_extension.recv obtains the server negotiate curve successfully. */
         {
-            struct s2n_connection *client_conn;
-            struct s2n_connection *server_conn;
+            struct s2n_connection *client_conn = NULL;
+            struct s2n_connection *server_conn = NULL;
 
             EXPECT_NOT_NULL(server_conn = s2n_connection_new(S2N_SERVER));
             EXPECT_NOT_NULL(client_conn = s2n_connection_new(S2N_CLIENT));
@@ -514,9 +514,7 @@ int main(int argc, char **argv)
         /* KEM groups with Test Vectors defined in /tests/unit/kats/tls13_server_hybrid_key_share_recv.kat */
         const struct s2n_kem_group *test_kem_groups[] = {
             &s2n_secp256r1_kyber_512_r3,
-#if EVP_APIS_SUPPORTED
             &s2n_x25519_kyber_512_r3,
-#endif
         };
 
         const struct s2n_kem_preferences test_kem_prefs = {
@@ -538,8 +536,8 @@ int main(int argc, char **argv)
         const struct s2n_kem_preferences test_all_supported_kem_prefs = {
             .kem_count = 0,
             .kems = NULL,
-            .tls13_kem_group_count = S2N_SUPPORTED_KEM_GROUPS_COUNT,
-            .tls13_kem_groups = ALL_SUPPORTED_KEM_GROUPS,
+            .tls13_kem_group_count = kem_preferences_all.tls13_kem_group_count,
+            .tls13_kem_groups = kem_preferences_all.tls13_kem_groups,
             .tls13_pq_hybrid_draft_revision = 0
         };
 
@@ -547,26 +545,6 @@ int main(int argc, char **argv)
             .minimum_protocol_version = S2N_SSLv3,
             .cipher_preferences = &cipher_preferences_test_all_tls13,
             .kem_preferences = &test_all_supported_kem_prefs,
-            .signature_preferences = &s2n_signature_preferences_20200207,
-            .ecc_preferences = &s2n_ecc_preferences_20200310,
-        };
-
-        const struct s2n_kem_group *kem_groups_kyber[] = {
-            &s2n_secp256r1_kyber_512_r3,
-        };
-
-        const struct s2n_kem_preferences kem_prefs_kyber = {
-            .kem_count = 0,
-            .kems = NULL,
-            .tls13_kem_group_count = s2n_array_len(kem_groups_kyber),
-            .tls13_kem_groups = kem_groups_kyber,
-            .tls13_pq_hybrid_draft_revision = 0
-        };
-
-        const struct s2n_security_policy security_policy_kyber = {
-            .minimum_protocol_version = S2N_SSLv3,
-            .cipher_preferences = &cipher_preferences_test_all_tls13,
-            .kem_preferences = &kem_prefs_kyber,
             .signature_preferences = &s2n_signature_preferences_20200207,
             .ecc_preferences = &s2n_ecc_preferences_20200310,
         };
@@ -589,7 +567,7 @@ int main(int argc, char **argv)
                 EXPECT_SUCCESS(s2n_stuffer_init(&iana_stuffer, &iana_blob));
                 EXPECT_SUCCESS(s2n_stuffer_write_uint16(&iana_stuffer, test_security_policy.kem_preferences->tls13_kem_groups[0]->iana_id));
 
-                EXPECT_FAILURE_WITH_ERRNO(s2n_server_key_share_extension.recv(client_conn, &iana_stuffer), S2N_ERR_PQ_DISABLED);
+                EXPECT_FAILURE_WITH_ERRNO(s2n_server_key_share_extension.recv(client_conn, &iana_stuffer), S2N_ERR_NO_SUPPORTED_LIBCRYPTO_API);
 
                 EXPECT_SUCCESS(s2n_connection_free(client_conn));
             }
@@ -599,6 +577,9 @@ int main(int argc, char **argv)
                 {
                     for (size_t i = 0; i < s2n_array_len(test_kem_groups); i++) {
                         const struct s2n_kem_group *kem_group = test_kem_groups[i];
+                        if (!s2n_kem_group_is_available(kem_group)) {
+                            continue;
+                        }
                         struct s2n_connection *client_conn = NULL;
                         EXPECT_NOT_NULL(client_conn = s2n_connection_new(S2N_CLIENT));
                         client_conn->security_policy_override = &test_security_policy;
@@ -698,7 +679,10 @@ int main(int argc, char **argv)
                 {
                     for (size_t i = 0; i < s2n_array_len(test_kem_groups); i++) {
                         const struct s2n_kem_group *kem_group = test_kem_groups[i];
-                        struct s2n_connection *client_conn;
+                        if (!s2n_kem_group_is_available(kem_group)) {
+                            continue;
+                        }
+                        struct s2n_connection *client_conn = NULL;
                         EXPECT_NOT_NULL(client_conn = s2n_connection_new(S2N_CLIENT));
                         client_conn->security_policy_override = &test_security_policy;
 
@@ -798,11 +782,11 @@ int main(int argc, char **argv)
             EXPECT_NOT_NULL(conn = s2n_connection_new(S2N_SERVER));
 
             if (!s2n_pq_is_enabled()) {
-                EXPECT_FAILURE_WITH_ERRNO(s2n_server_key_share_send_check_pq_hybrid(conn), S2N_ERR_PQ_DISABLED);
+                EXPECT_FAILURE_WITH_ERRNO(s2n_server_key_share_send_check_pq_hybrid(conn), S2N_ERR_NO_SUPPORTED_LIBCRYPTO_API);
             }
 
             if (s2n_pq_is_enabled()) {
-                conn->security_policy_override = &security_policy_kyber;
+                conn->security_policy_override = &test_all_supported_kems_security_policy;
 
                 EXPECT_FAILURE(s2n_server_key_share_send_check_pq_hybrid(conn));
                 conn->kex_params.server_kem_group_params.kem_params.kem = &s2n_kyber_512_r3;
@@ -841,7 +825,7 @@ int main(int argc, char **argv)
         /* Test s2n_server_key_share_extension.send sends key share success (PQ) */
         if (s2n_pq_is_enabled()) {
             for (int len_prefixed = 0; len_prefixed < 2; len_prefixed++) {
-                for (size_t i = 0; i < S2N_SUPPORTED_KEM_GROUPS_COUNT; i++) {
+                for (size_t i = 0; i < S2N_KEM_GROUPS_COUNT; i++) {
                     struct s2n_connection *conn = NULL;
                     EXPECT_NOT_NULL(conn = s2n_connection_new(S2N_SERVER));
                     conn->security_policy_override = &test_all_supported_kems_security_policy;
@@ -859,6 +843,10 @@ int main(int argc, char **argv)
 
                     struct s2n_kem_group_params *server_params = &conn->kex_params.server_kem_group_params;
                     const struct s2n_kem_group *kem_group = kem_pref->tls13_kem_groups[i];
+                    if (!s2n_kem_group_is_available(kem_group)) {
+                        EXPECT_SUCCESS(s2n_connection_free(conn));
+                        continue;
+                    }
                     server_params->kem_group = kem_group;
                     server_params->kem_params.kem = kem_group->kem;
                     server_params->ecc_params.negotiated_curve = kem_group->curve;
@@ -929,6 +917,9 @@ int main(int argc, char **argv)
             for (size_t i = 0; i < kem_pref->tls13_kem_group_count; i++) {
                 struct s2n_kem_group_params *server_params = &conn->kex_params.server_kem_group_params;
                 const struct s2n_kem_group *kem_group = kem_pref->tls13_kem_groups[i];
+                if (!s2n_kem_group_is_available(kem_group)) {
+                    continue;
+                }
 
                 server_params->kem_group = kem_group;
                 server_params->kem_params.kem = kem_group->kem;

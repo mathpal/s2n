@@ -65,9 +65,15 @@
 
 /* TLS 1.3 hybrid post-quantum definitions are from the proposed reserved range defined
  * in https://tools.ietf.org/html/draft-stebila-tls-hybrid-design. Values for interoperability are defined in
- * https://github.com/open-quantum-safe/openssl/blob/OQS-OpenSSL_1_1_1-stable/oqs-template/oqs-kem-info.md */
-#define TLS_PQ_KEM_GROUP_ID_X25519_KYBER_512_R3    0x2F39
-#define TLS_PQ_KEM_GROUP_ID_SECP256R1_KYBER_512_R3 0x2F3A
+ * https://github.com/open-quantum-safe/oqs-provider/blob/main/oqs-template/oqs-kem-info.md and
+ * https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml
+ */
+#define TLS_PQ_KEM_GROUP_ID_X25519_KYBER_512_R3     0x2F39
+#define TLS_PQ_KEM_GROUP_ID_SECP256R1_KYBER_512_R3  0x2F3A
+#define TLS_PQ_KEM_GROUP_ID_SECP384R1_KYBER_768_R3  0x2F3C
+#define TLS_PQ_KEM_GROUP_ID_SECP521R1_KYBER_1024_R3 0x2F3D
+#define TLS_PQ_KEM_GROUP_ID_X25519_KYBER_768_R3     0x6399
+#define TLS_PQ_KEM_GROUP_ID_SECP256R1_KYBER_768_R3  0x639A
 
 /* From https://tools.ietf.org/html/rfc7507 */
 #define TLS_FALLBACK_SCSV                 0x56, 0x00
@@ -118,7 +124,7 @@
  *#      quic_transport_parameters(0x39), (65535)
  *#   } ExtensionType;
  */
-#define TLS_QUIC_TRANSPORT_PARAMETERS 0x39
+#define TLS_EXTENSION_QUIC_TRANSPORT_PARAMETERS 0x39
 
 /* TLS SignatureScheme (Backwards compatible with SigHash and SigAlg values above) */
 /* Defined here: https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml#tls-signaturescheme */
@@ -141,18 +147,14 @@
 #define TLS_SIGNATURE_SCHEME_ECDSA_SHA384 0x0503
 #define TLS_SIGNATURE_SCHEME_ECDSA_SHA512 0x0603
 
-/* TLS 1.3 ECDSA Signature Schemes */
-#define TLS_SIGNATURE_SCHEME_ECDSA_SECP256R1_SHA256 0x0403
-#define TLS_SIGNATURE_SCHEME_ECDSA_SECP384R1_SHA384 0x0503
-#define TLS_SIGNATURE_SCHEME_ECDSA_SECP521R1_SHA512 0x0603
-#define TLS_SIGNATURE_SCHEME_RSA_PSS_RSAE_SHA256    0x0804
-#define TLS_SIGNATURE_SCHEME_RSA_PSS_RSAE_SHA384    0x0805
-#define TLS_SIGNATURE_SCHEME_RSA_PSS_RSAE_SHA512    0x0806
-#define TLS_SIGNATURE_SCHEME_ED25519                0x0807
-#define TLS_SIGNATURE_SCHEME_ED448                  0x0808
-#define TLS_SIGNATURE_SCHEME_RSA_PSS_PSS_SHA256     0x0809
-#define TLS_SIGNATURE_SCHEME_RSA_PSS_PSS_SHA384     0x080A
-#define TLS_SIGNATURE_SCHEME_RSA_PSS_PSS_SHA512     0x080B
+#define TLS_SIGNATURE_SCHEME_RSA_PSS_RSAE_SHA256 0x0804
+#define TLS_SIGNATURE_SCHEME_RSA_PSS_RSAE_SHA384 0x0805
+#define TLS_SIGNATURE_SCHEME_RSA_PSS_RSAE_SHA512 0x0806
+#define TLS_SIGNATURE_SCHEME_ED25519             0x0807
+#define TLS_SIGNATURE_SCHEME_ED448               0x0808
+#define TLS_SIGNATURE_SCHEME_RSA_PSS_PSS_SHA256  0x0809
+#define TLS_SIGNATURE_SCHEME_RSA_PSS_PSS_SHA384  0x080A
+#define TLS_SIGNATURE_SCHEME_RSA_PSS_PSS_SHA512  0x080B
 
 #define TLS_SIGNATURE_SCHEME_LEN          2
 #define TLS_SIGNATURE_SCHEME_LIST_MAX_LEN 64

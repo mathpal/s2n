@@ -84,6 +84,7 @@ S2N_RESULT s2n_key_log_tls13_secret(struct s2n_connection *conn, const struct s2
     const uint8_t server_handshake_label[] = "SERVER_HANDSHAKE_TRAFFIC_SECRET ";
     const uint8_t client_traffic_label[] = "CLIENT_TRAFFIC_SECRET_0 ";
     const uint8_t server_traffic_label[] = "SERVER_TRAFFIC_SECRET_0 ";
+    const uint8_t exporter_secret_label[] = "EXPORTER_SECRET ";
 
     const uint8_t *label = NULL;
     uint8_t label_size = 0;
@@ -108,6 +109,10 @@ S2N_RESULT s2n_key_log_tls13_secret(struct s2n_connection *conn, const struct s2
         case S2N_SERVER_APPLICATION_TRAFFIC_SECRET:
             label = server_traffic_label;
             label_size = sizeof(server_traffic_label) - 1;
+            break;
+        case S2N_EXPORTER_SECRET:
+            label = exporter_secret_label;
+            label_size = sizeof(exporter_secret_label) - 1;
             break;
         default:
             /* Ignore the secret types we don't understand */
@@ -160,7 +165,7 @@ S2N_RESULT s2n_key_log_tls12_secret(struct s2n_connection *conn)
     RESULT_GUARD_POSIX(s2n_stuffer_write_bytes(&output, label, label_size));
     RESULT_GUARD(s2n_key_log_hex_encode(&output, conn->handshake_params.client_random, S2N_TLS_RANDOM_DATA_LEN));
     RESULT_GUARD_POSIX(s2n_stuffer_write_uint8(&output, ' '));
-    RESULT_GUARD(s2n_key_log_hex_encode(&output, conn->secrets.tls12.master_secret, S2N_TLS_SECRET_LEN));
+    RESULT_GUARD(s2n_key_log_hex_encode(&output, conn->secrets.version.tls12.master_secret, S2N_TLS_SECRET_LEN));
 
     uint8_t *data = s2n_stuffer_raw_read(&output, len);
     RESULT_ENSURE_REF(data);

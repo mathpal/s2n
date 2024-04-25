@@ -99,8 +99,8 @@ static int s2n_server_hello_parse(struct s2n_connection *conn)
     POSIX_ENSURE_REF(conn->secure);
 
     struct s2n_stuffer *in = &conn->handshake.io;
-    uint8_t compression_method;
-    uint8_t session_id_len;
+    uint8_t compression_method = 0;
+    uint8_t session_id_len = 0;
     uint8_t protocol_version[S2N_TLS_PROTOCOL_VERSION_LEN];
     uint8_t session_id[S2N_TLS_SESSION_ID_MAX_LEN];
 
@@ -193,6 +193,9 @@ static int s2n_server_hello_parse(struct s2n_connection *conn)
 
         conn->actual_protocol_version = conn->server_protocol_version;
         POSIX_GUARD(s2n_set_cipher_as_client(conn, cipher_suite_wire));
+
+        /* Erase TLS 1.2 client session ticket which might have been set for session resumption */
+        POSIX_GUARD(s2n_free(&conn->client_ticket));
     } else {
         conn->server_protocol_version = legacy_version;
 
@@ -209,7 +212,7 @@ static int s2n_server_hello_parse(struct s2n_connection *conn)
          */
         POSIX_ENSURE(conn->early_data_state != S2N_EARLY_DATA_REQUESTED, S2N_ERR_PROTOCOL_VERSION_UNSUPPORTED);
 
-        const struct s2n_security_policy *security_policy;
+        const struct s2n_security_policy *security_policy = NULL;
         POSIX_GUARD(s2n_connection_get_security_policy(conn, &security_policy));
 
         if (conn->server_protocol_version < security_policy->minimum_protocol_version
@@ -218,7 +221,7 @@ static int s2n_server_hello_parse(struct s2n_connection *conn)
             POSIX_BAIL(S2N_ERR_PROTOCOL_VERSION_UNSUPPORTED);
         }
 
-        uint8_t actual_protocol_version = MIN(conn->server_protocol_version, conn->client_protocol_version);
+        conn->actual_protocol_version = MIN(conn->server_protocol_version, conn->client_protocol_version);
 
         /*
          *= https://tools.ietf.org/rfc/rfc5077#section-3.4
@@ -230,8 +233,8 @@ static int s2n_server_hello_parse(struct s2n_connection *conn)
          */
         if (session_ids_match) {
             /* check if the resumed session state is valid */
-            S2N_ERROR_IF(conn->actual_protocol_version != actual_protocol_version, S2N_ERR_BAD_MESSAGE);
-            S2N_ERROR_IF(memcmp(conn->secure->cipher_suite->iana_value, cipher_suite_wire, S2N_TLS_CIPHER_SUITE_LEN) != 0,
+            POSIX_ENSURE(conn->resume_protocol_version == conn->actual_protocol_version, S2N_ERR_BAD_MESSAGE);
+            POSIX_ENSURE(memcmp(conn->secure->cipher_suite->iana_value, cipher_suite_wire, S2N_TLS_CIPHER_SUITE_LEN) == 0,
                     S2N_ERR_BAD_MESSAGE);
 
             /* Session is resumed */
@@ -239,10 +242,9 @@ static int s2n_server_hello_parse(struct s2n_connection *conn)
         } else {
             conn->session_id_len = session_id_len;
             POSIX_CHECKED_MEMCPY(conn->session_id, session_id, session_id_len);
-            conn->actual_protocol_version = actual_protocol_version;
             POSIX_GUARD(s2n_set_cipher_as_client(conn, cipher_suite_wire));
             /* Erase master secret which might have been set for session resumption */
-            POSIX_CHECKED_MEMSET((uint8_t *) conn->secrets.tls12.master_secret, 0, S2N_TLS_SECRET_LEN);
+            POSIX_CHECKED_MEMSET((uint8_t *) conn->secrets.version.tls12.master_secret, 0, S2N_TLS_SECRET_LEN);
 
             /* Erase client session ticket which might have been set for session resumption */
             POSIX_GUARD(s2n_free(&conn->client_ticket));
@@ -283,9 +285,6 @@ int s2n_server_hello_recv(struct s2n_connection *conn)
     if (conn->actual_protocol_version < S2N_TLS13 && s2n_connection_is_session_resumed(conn)) {
         POSIX_GUARD(s2n_prf_key_expansion(conn));
     }
-
-    /* Choose a default signature scheme */
-    POSIX_GUARD(s2n_choose_default_sig_scheme(conn, &conn->handshake_params.conn_sig_scheme, S2N_SERVER));
 
     /* Update the required hashes for this connection */
     POSIX_GUARD(s2n_conn_update_required_handshake_hashes(conn));

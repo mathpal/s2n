@@ -16,7 +16,7 @@
 #include <string.h>
 
 #include "crypto/s2n_ecc_evp.h"
-#include "pq-crypto/s2n_pq.h"
+#include "crypto/s2n_pq.h"
 #include "s2n_test.h"
 #include "testlib/s2n_testlib.h"
 #include "tls/s2n_cipher_suites.h"
@@ -40,6 +40,10 @@ int main(int argc, char **argv)
 {
     BEGIN_TEST();
     EXPECT_SUCCESS(s2n_disable_tls13_in_test());
+
+    char dhparams_pem[S2N_MAX_TEST_PEM_SIZE] = { 0 };
+    EXPECT_SUCCESS(s2n_read_test_pem(S2N_DEFAULT_TEST_DHPARAMS, dhparams_pem,
+            S2N_MAX_TEST_PEM_SIZE));
 
     /* Test client cipher selection */
     {
@@ -148,10 +152,10 @@ int main(int argc, char **argv)
 
     /* Test server cipher selection and scsv detection */
     {
-        struct s2n_connection *conn;
-        struct s2n_config *server_config;
-        char *rsa_cert_chain_pem, *rsa_private_key_pem, *ecdsa_cert_chain_pem, *ecdsa_private_key_pem;
-        struct s2n_cert_chain_and_key *rsa_cert, *ecdsa_cert;
+        struct s2n_connection *conn = NULL;
+        struct s2n_config *server_config = NULL;
+        char *rsa_cert_chain_pem = NULL, *rsa_private_key_pem = NULL, *ecdsa_cert_chain_pem = NULL, *ecdsa_private_key_pem = NULL;
+        struct s2n_cert_chain_and_key *rsa_cert = NULL, *ecdsa_cert = NULL;
         /* Allocate all of the objects and PEMs we'll need for this test. */
         EXPECT_NOT_NULL(rsa_cert_chain_pem = malloc(S2N_MAX_TEST_PEM_SIZE));
         EXPECT_NOT_NULL(rsa_private_key_pem = malloc(S2N_MAX_TEST_PEM_SIZE));
@@ -429,6 +433,7 @@ int main(int argc, char **argv)
         EXPECT_NOT_NULL(server_config = s2n_config_new());
         EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(server_config, rsa_cert));
         EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(server_config, ecdsa_cert));
+        EXPECT_SUCCESS(s2n_connection_set_config(conn, server_config));
 
         /* Client sends RSA and ECDSA ciphers, server prioritizes ECDSA, ECDSA + RSA cert is configured */
         {
@@ -546,6 +551,7 @@ int main(int argc, char **argv)
         EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(server_config, ecdsa_cert));
         /* Override auto-chosen defaults with only RSA cert default. ECDSA still loaded, but not default. */
         EXPECT_SUCCESS(s2n_config_set_cert_chain_and_key_defaults(server_config, &rsa_cert, 1));
+        EXPECT_SUCCESS(s2n_connection_set_config(conn, server_config));
 
         /* Client sends RSA and ECDSA ciphers, server prioritizes ECDSA, ECDSA + RSA cert is configured,
          * only RSA is default. Expect default RSA used instead of previous test that expects ECDSA for this case. */
@@ -839,6 +845,31 @@ int main(int argc, char **argv)
             EXPECT_FAILURE_WITH_ERRNO(s2n_set_cipher_as_tls_server(conn, invalid_cipher_pref, invalid_cipher_count), S2N_ERR_CIPHER_NOT_SUPPORTED);
             EXPECT_SUCCESS(s2n_connection_wipe(conn));
             EXPECT_SUCCESS(s2n_disable_tls13_in_test());
+        };
+
+        /* Client sends cipher that requires DH params */
+        {
+            DEFER_CLEANUP(struct s2n_config *config = s2n_config_new(),
+                    s2n_config_ptr_free);
+            EXPECT_SUCCESS(s2n_config_set_cipher_preferences(config, "test_all"));
+            EXPECT_SUCCESS(s2n_config_add_cert_chain_and_key_to_store(config, rsa_cert));
+
+            DEFER_CLEANUP(struct s2n_connection *server = s2n_connection_new(S2N_SERVER),
+                    s2n_connection_ptr_free);
+            EXPECT_NOT_NULL(server);
+            EXPECT_SUCCESS(s2n_connection_set_config(server, config));
+
+            /* The client only offers one cipher suite, which requires dh kex */
+            uint8_t wire[] = { TLS_DHE_RSA_WITH_AES_128_GCM_SHA256 };
+
+            /* By default, the server does not accept cipher suites with dh kex. */
+            EXPECT_FAILURE_WITH_ERRNO(s2n_set_cipher_as_tls_server(server, wire, 1),
+                    S2N_ERR_CIPHER_NOT_SUPPORTED);
+
+            /* With dh params configured, the server accepts cipher suites with dh kex. */
+            EXPECT_SUCCESS(s2n_config_add_dhparams(config, dhparams_pem));
+            EXPECT_SUCCESS(s2n_set_cipher_as_tls_server(server, wire, 1));
+            EXPECT_EQUAL(server->secure->cipher_suite, &s2n_dhe_rsa_with_aes_128_gcm_sha256);
         };
 
         EXPECT_SUCCESS(s2n_config_free(server_config));

@@ -68,8 +68,12 @@ fi
 if [[ "$S2N_LIBCRYPTO" == "awslc" && ! -d "$AWSLC_INSTALL_DIR" ]]; then
     codebuild/bin/install_awslc.sh "$(mktemp -d)" "$AWSLC_INSTALL_DIR" "0" > /dev/null ;
 fi
+
 if [[ "$S2N_LIBCRYPTO" == "awslc-fips" && ! -d "$AWSLC_FIPS_INSTALL_DIR" ]]; then
     codebuild/bin/install_awslc.sh "$(mktemp -d)" "$AWSLC_FIPS_INSTALL_DIR" "1" > /dev/null ;
+fi
+if [[ "$S2N_LIBCRYPTO" == "awslc-fips-2022" && ! -d "$AWSLC_FIPS_2022_INSTALL_DIR" ]]; then
+    codebuild/bin/install_awslc_fips_2022.sh "$(mktemp -d)" "$AWSLC_FIPS_2022_INSTALL_DIR" > /dev/null ;
 fi
 
 if [[ "$TESTS" == "integrationv2" || "$TESTS" == "ALL" ]]; then
@@ -93,18 +97,6 @@ if [[ "$TESTS" == "integrationv2" || "$TESTS" == "ALL" ]]; then
                 ;;
             esac
         fi
-    fi
-
-    if [[ ! -x "$OPENSSL_0_9_8_INSTALL_DIR/bin/openssl" ]]; then
-      # Download and Install Openssl 0.9.8
-      mkdir -p "$OPENSSL_0_9_8_INSTALL_DIR"||true
-      codebuild/bin/install_openssl_0_9_8.sh "$(mktemp -d)" "$OPENSSL_0_9_8_INSTALL_DIR" "$OS_NAME" > /dev/null ;
-    fi
-
-    if [[ ! -x "$GNUTLS_INSTALL_DIR/bin/gnutls-cli" ]]; then
-      # Download and Install GnuTLS for integration tests
-      mkdir -p "$GNUTLS_INSTALL_DIR"||true
-      codebuild/bin/install_gnutls.sh "$(mktemp -d)" "$GNUTLS_INSTALL_DIR" > /dev/null ;
     fi
 
     if [[ ! -x "$GNUTLS37_INSTALL_DIR/bin/gnutls-cli" ]]; then

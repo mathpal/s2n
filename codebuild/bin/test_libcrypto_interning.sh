@@ -15,15 +15,15 @@
 
 set -e
 
-
+source codebuild/bin/s2n_setup_env.sh
 source codebuild/bin/jobs.sh
 
 # build 2 different version of libcrypto to make it easy to break the application if
 # interning doesn't work as expected
 WHICH_LIBCRYPTO=$(echo "${S2N_LIBCRYPTO:-"openssl-1.1.1"}")
 TARGET_LIBCRYPTO="${WHICH_LIBCRYPTO//[-.]/_}"
-TARGET_LIBCRYPTO_PATH="$(pwd)/build/${TARGET_LIBCRYPTO}"
-OPENSSL_1_0="$(pwd)/build/openssl_1_0"
+TARGET_LIBCRYPTO_PATH="${TEST_DEPS_DIR}/${WHICH_LIBCRYPTO}"
+OPENSSL_1_0="$OPENSSL_1_0_2_INSTALL_DIR"
 if [ ! -f $OPENSSL_1_0/lib/libcrypto.a ]; then
   ./codebuild/bin/install_openssl_1_0_2.sh $OPENSSL_1_0/src $OPENSSL_1_0 linux
 fi
@@ -147,8 +147,13 @@ done
 
 run_connection_test() {
     local TARGET="$1"
+    
     LD_PRELOAD=$OPENSSL_1_0/lib/libcrypto.so ./build/$TARGET/bin/s2nd -c default_tls13 localhost 4433 &> /dev/null &
     local SERVER_PID=$!
+    
+    # Wait for the server to start up before connecting
+    sleep 5s
+    
     LD_PRELOAD=$OPENSSL_1_0/lib/libcrypto.so ./build/$TARGET/bin/s2nc -i -c default_tls13 localhost 4433 | tee build/client.log
     kill $SERVER_PID &> /dev/null || true
 
@@ -158,11 +163,14 @@ run_connection_test() {
 }
 
 # without interning, the connection should fail when linking the wrong version of libcrypto
-echo "running pair: TLS 1.3 failure expected"
+echo "Running test: attempt TLS1.3 handshake without interning"
 run_connection_test shared-default && fail "TLS 1.3 handshake was expected to fail"
+echo "TLS1.3 handshake failed as expected"
+echo ""
 
 # with interning, the connection should succeed even though we've linked the wrong version of libcrypto
-echo "running pair: TLS 1.3 success expected"
+echo "Running test: attempt TLS1.3 handshake with interning"
 run_connection_test shared-testing || fail "TLS 1.3 handshake was expected to succeed"
+echo "TLS1.3 handshake succeeded as expected"
 
 echo "SUCCESS!"

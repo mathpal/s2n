@@ -38,6 +38,11 @@
 
 #define MAX_CERTIFICATES 50
 
+/*
+ * s2nd is an example server that uses many s2n-tls APIs.
+ * It is intended for testing purposes only, and should not be used in production.
+ */
+
 static char default_certificate_chain[] =
         "-----BEGIN CERTIFICATE-----"
         "MIIDHTCCAgWgAwIBAgIUPxywpg3/+VHmj8jJSvK62XC06zMwDQYJKoZIhvcNAQEL"
@@ -140,7 +145,7 @@ void usage()
     fprintf(stderr, "    Sets a single application protocol supported by this server.\n");
     fprintf(stderr, "  -c [version_string]\n");
     fprintf(stderr, "  --ciphers [version_string]\n");
-    fprintf(stderr, "    Set the cipher preference version string. Defaults to \"default\". See USAGE-GUIDE.md\n");
+    fprintf(stderr, "    Set the cipher preference version string. Defaults to \"default\" \n");
     fprintf(stderr, "  --enter-fips-mode\n");
     fprintf(stderr, "    Enter libcrypto's FIPS mode. The linked version of OpenSSL must be built with the FIPS module.\n");
     fprintf(stderr, "  --cert\n");
@@ -249,8 +254,8 @@ int handle_connection(int fd, struct s2n_config *config, struct conn_settings se
 
 int main(int argc, char *const *argv)
 {
-    struct addrinfo hints, *ai;
-    int r, sockfd = 0;
+    struct addrinfo hints, *ai = NULL;
+    int r = 0, sockfd = 0;
 
     /* required args */
     const char *host = NULL;
@@ -624,7 +629,7 @@ int main(int argc, char *const *argv)
                 "Failed to set key log callback");
     }
 
-    int fd;
+    int fd = 0;
     while ((fd = accept(sockfd, ai->ai_addr, &ai->ai_addrlen)) > 0) {
         if (non_blocking) {
             int flags = fcntl(sockfd, F_GETFL, 0);

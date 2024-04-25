@@ -31,6 +31,13 @@ struct s2n_client_hello {
     s2n_parsed_extensions_list extensions;
     struct s2n_blob cipher_suites;
     struct s2n_blob session_id;
+    struct s2n_blob compression_methods;
+    /* The protocol version as written in the client hello */
+    uint8_t legacy_version;
+    /* The protocol written on the record header containing the client hello */
+    uint8_t legacy_record_version;
+    /* Tracks if we have recorded the version in the first record */
+    unsigned int record_version_recorded : 1;
 
     unsigned int callback_invoked : 1;
     unsigned int callback_async_blocked : 1;
@@ -43,7 +50,6 @@ struct s2n_client_hello {
      * issues a hello retry.
      */
     unsigned int parsed : 1;
-
     /*
      * SSLv2 ClientHellos have a different format.
      * Cipher suites are each three bytes instead of two.
@@ -51,9 +57,20 @@ struct s2n_client_hello {
      * the raw_message will not contain the protocol version.
      */
     unsigned int sslv2 : 1;
+    /*
+     * The memory for this structure can be either owned by the application
+     * or tied to and managed by a connection.
+     *
+     * If owned by the application, it can be freed using s2n_client_hello_free.
+     * Otherwise, it is freed with s2n_connection_free.
+     *
+     * We could simplify this by moving the client hello structure off of the
+     * connection structure.
+     */
+    unsigned int alloced : 1;
 };
 
-int s2n_client_hello_free(struct s2n_client_hello *client_hello);
+int s2n_client_hello_free_raw_message(struct s2n_client_hello *client_hello);
 
 struct s2n_client_hello *s2n_connection_get_client_hello(struct s2n_connection *conn);
 

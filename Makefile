@@ -47,7 +47,6 @@ include s2n.mk
 
 .PHONY : libs
 libs:
-	$(MAKE) -C pq-crypto
 	$(MAKE) -C utils
 	$(MAKE) -C error
 	$(MAKE) -C stuffer
@@ -66,6 +65,12 @@ integrationv2: bin
 .PHONY : valgrind
 valgrind: bin
 	$(MAKE) -C tests valgrind
+
+# https://github.com/aws/s2n-tls/issues/3758
+# Run valgrind in pedantic mode (--errors-for-leak-kinds=all)
+.PHONY : pedantic_valgrind
+pedantic_valgrind: bin
+	$(MAKE) -C tests pedantic_valgrind
 
 .PHONY : fuzz
 ifeq ($(shell uname),Linux)
@@ -95,12 +100,11 @@ run-lcov:
 	$(MAKE) -C bin lcov
 	$(MAKE) -C crypto lcov
 	$(MAKE) -C error lcov
-	$(MAKE) -C pq-crypto run-lcov
 	$(MAKE) -C stuffer lcov
 	$(MAKE) -C tests lcov
 	$(MAKE) -C tls run-lcov
 	$(MAKE) -C utils lcov
-	lcov -a crypto/coverage.info -a error/coverage.info -a pq-crypto/coverage.info -a pq-crypto/kyber_r3/coverage.info -a stuffer/coverage.info -a tls/coverage.info -a $(wildcard tls/*/coverage.info) -a utils/coverage.info --output ${COVERAGE_DIR}/all_coverage.info
+	lcov -a crypto/coverage.info -a error/coverage.info -a stuffer/coverage.info -a tls/coverage.info -a $(wildcard tls/*/coverage.info) -a utils/coverage.info --output ${COVERAGE_DIR}/all_coverage.info
 
 .PHONY : run-genhtml
 run-genhtml:
@@ -109,7 +113,6 @@ run-genhtml:
 
 .PHONY : indent
 indent:
-	$(MAKE) -C pq-crypto indentsource
 	$(MAKE) -C tests indentsource
 	$(MAKE) -C stuffer indentsource
 	$(MAKE) -C crypto indentsource
@@ -141,7 +144,6 @@ uninstall:
 
 .PHONY : clean
 clean:
-	$(MAKE) -C pq-crypto clean
 	$(MAKE) -C tests clean
 	$(MAKE) -C stuffer decruft
 	$(MAKE) -C crypto decruft

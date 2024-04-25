@@ -4,11 +4,16 @@ export PATH=$SRC_ROOT/build/bin:$PATH
 
 banner()
 {
-    echo "+------------------------------------------+"
-    printf "| %-40s |\n" "$1"
-    echo "+------------------------------------------+"
+    echo "+---------------------------------------------------------+"
+    printf "| %-55s |\n" "$1"
+    echo "+---------------------------------------------------------+"
 }
 
+
+function clean {
+    banner "Cleanup ./build"
+    rm -rf ./build
+}
 
 function configure {
     banner "Configuring with cmake"
@@ -16,8 +21,9 @@ function configure {
           -DBUILD_TESTING=ON \
           -DS2N_INTEG_TESTS=ON \
           -DS2N_INSTALL_S2NC_S2ND=ON \
-          -DS2N_FAST_INTEG_TESTS=ON \
+          -DS2N_INTEG_NIX=ON \
           -DBUILD_SHARED_LIBS=ON \
+          $S2N_CMAKE_OPTIONS \
           -DCMAKE_BUILD_TYPE=RelWithDebInfo
 }
 
@@ -53,7 +59,13 @@ function integ {
         (cd $SRC_ROOT/build; ctest -L integrationv2 -E "(integrationv2_cross_compatibility|integrationv2_renegotiate_apache)" --verbose)
     else
         banner "Warning: cross_compatibility & renegotiate_apache are not supported in nix for various reasons integ help for more info."
-        (cd $SRC_ROOT/build; ctest -L integrationv2 -R "$1" --verbose)
+        for test in $@; do
+            ctest --test-dir ./build -L integrationv2 --no-tests=error --output-on-failure -R "$test" --verbose
+            if [ "$?" -ne 0 ]; then
+               echo "Test failed, stopping execution"
+               return 1
+            fi
+        done
     fi
 }
 
@@ -103,3 +115,32 @@ function do-clang-format {
     src_files+=`find ./tests/testlib -name .git -prune -o -regextype posix-egrep -regex "$include_regex" -print`;
     echo $src_files | xargs -n 1 -P $(nproc) clang-format -style=file -i)
 }
+
+function test_toolchain_counts {
+    # This is a starting point for a unit test of the devShell.
+    # The choosen S2N_LIBCRYPTO should be 2, and the others should be zero.
+    banner "Checking the CMAKE_INCLUDE_PATH for libcrypto counts"
+    echo $CMAKE_INCLUDE_PATH|gawk 'BEGIN{RS=":"; o10=0; o11=0; o3=0;awslc=0;libre=0}
+      /openssl-3.0/{o3++}
+      /openssl-1.1/{o11++}
+      /openssl-1.0/{o10++}
+      /aws-lc/{awslc++}
+      /libressl/{libre++}
+      END{print "\nOpenssl3:\t",o3,"\nOpenssl1.1:\t",o11,"\nOpenssl1.0.2:\t",o10,"\nAwlc:\t\t",awslc,"\nLibreSSL:\t", libre}'
+    banner "Checking tooling counts (these should all be 1)"
+    echo -e "\nOpenssl integ:\t $(openssl version|grep -c '1.1.1')"
+    echo -e "Corretto 17:\t $(java -version 2>&1|grep -ce 'Runtime.*Corretto-17')"
+    echo -e "gnutls-cli:\t $(gnutls-cli --version |grep -c 'gnutls-cli 3.7')"
+    echo -e "gnutls-serv:\t $(gnutls-serv --version |grep -c 'gnutls-serv 3.7')"
+    echo -e "Nix Python:\t $(which python|grep -c '/nix/store')"
+    echo -e "Nix pytest:\t $(which pytest|grep -c '/nix/store')"
+    echo -e "Nix sslyze:\t $(which sslyze|grep -c '/nix/store')"
+    echo -e "python nassl:\t $(pip freeze|grep -c 'nassl')"
+    echo -e "valgrind:\t $(valgrind --version|grep -c 'valgrind-3.19.0')"
+}
+
+function test_nonstandard_compilation {
+    # Any script that needs to compile s2n in a non-standard way can run here
+    ./codebuild/bin/test_dynamic_load.sh $(mktemp -d)
+}
+

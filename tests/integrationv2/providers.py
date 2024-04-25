@@ -1,4 +1,5 @@
 import os
+import subprocess
 import pytest
 import threading
 
@@ -6,12 +7,6 @@ from common import ProviderOptions, Ciphers, Curves, Protocols, Signatures
 from global_flags import get_flag, S2N_PROVIDER_VERSION, S2N_FIPS_MODE
 from global_flags import S2N_USE_CRITERION
 from stat import S_IMODE
-
-
-TLS_13_LIBCRYPTOS = {
-    "awslc",
-    "openssl-1.1.1"
-}
 
 
 class Provider(object):
@@ -152,27 +147,51 @@ class S2N(Provider):
 
     @classmethod
     def supports_protocol(cls, protocol, with_cert=None):
+        # TLS 1.3 is unsupported for openssl-1.0
+        # libressl and boringssl are disabled because of configuration issues
+        # see https://github.com/aws/s2n-tls/issues/3250
+        TLS_13_UNSUPPORTED_LIBCRYPTOS = {
+            "libressl",
+            "boringssl",
+            "openssl-1.0"
+        }
+
         # Disable TLS 1.3 tests for all libcryptos that don't support 1.3
+        if protocol == Protocols.TLS13:
+            current_libcrypto = get_flag(S2N_PROVIDER_VERSION)
+            for unsupported_lc in TLS_13_UNSUPPORTED_LIBCRYPTOS:
+                # e.g. "openssl-1.0" in "openssl-1.0.2-fips"
+                if unsupported_lc in current_libcrypto:
+                    return False
+
+        # SSLv3 cannot be negotiated in FIPS mode with libcryptos other than AWS-LC.
         if all([
-            libcrypto not in get_flag(S2N_PROVIDER_VERSION)
-            for libcrypto in TLS_13_LIBCRYPTOS
-        ]) and protocol == Protocols.TLS13:
+            protocol == Protocols.SSLv3,
+            get_flag(S2N_FIPS_MODE),
+            "awslc" not in get_flag(S2N_PROVIDER_VERSION)
+        ]):
             return False
 
         return True
 
     @classmethod
     def supports_cipher(cls, cipher, with_curve=None):
-        # Disable chacha20 tests in unsupported libcryptos
-        if any([
-            libcrypto in get_flag(S2N_PROVIDER_VERSION)
-            for libcrypto in [
-                "openssl-1.0.2",
-                "libressl"
-            ]
-        ]) and "CHACHA20" in cipher.name:
-            return False
+        # Disable chacha20 and RC4 tests in libcryptos that don't support those
+        # algorithms
+        unsupported_configurations = {
+            "CHACHA20": ["openssl-1.0.2", "libressl"],
+            "RC4": ["openssl-3"],
+        }
 
+        for unsupported_cipher, unsupported_libcryptos in unsupported_configurations.items():
+            # the queried cipher has some libcrypto's that don't support it
+            # e.g. "RC4" in "TLS_ECDHE_RSA_WITH_RC4_128_SHA"
+            if unsupported_cipher in cipher.name:
+                current_libcrypto = get_flag(S2N_PROVIDER_VERSION)
+                for lc in unsupported_libcryptos:
+                    # e.g. "openssl-3" in "openssl-3.0.7"
+                    if lc in current_libcrypto:
+                        return False
         return True
 
     @classmethod
@@ -314,12 +333,12 @@ class S2N(Provider):
 class CriterionS2N(S2N):
     """
     Wrap the S2N provider in criterion-rust
-    The CriterionS2N provider modifies the test command being run by pytest to be the criterion benchmark binary 
-    and moves the s2nc/d command line arguments into an environment variable.  The binary created by 
-    `cargo bench --no-run` has a unique name and must be searched for, which the CriterionS2N provider finds 
-    and replaces in the final testing command. The arguments to s2nc/d are moved to the environment variables 
-    `S2NC_ARGS` or `S2ND_ARGS`, along with the test name, which are read by the rust benchmark when spawning 
-    s2nc/d as subprocesses. 
+    The CriterionS2N provider modifies the test command being run by pytest to be the criterion benchmark binary
+    and moves the s2nc/d command line arguments into an environment variable.  The binary created by
+    `cargo bench --no-run` has a unique name and must be searched for, which the CriterionS2N provider finds
+    and replaces in the final testing command. The arguments to s2nc/d are moved to the environment variables
+    `S2NC_ARGS` or `S2ND_ARGS`, along with the test name, which are read by the rust benchmark when spawning
+    s2nc/d as subprocesses.
     """
     criterion_off = 'off'
     criterion_delta = 'delta'
@@ -404,6 +423,8 @@ class OpenSSL(Provider):
         Provider.__init__(self, options)
         # We print some OpenSSL logging that includes stderr
         self.expect_stderr = True  # lgtm [py/overwritten-inherited-attribute]
+        # Current provider needs 1.1.x https://github.com/aws/s2n-tls/issues/3963
+        self._is_openssl_11()
 
     @classmethod
     def get_send_marker(cls):
@@ -456,26 +477,23 @@ class OpenSSL(Provider):
 
     @classmethod
     def supports_protocol(cls, protocol, with_cert=None):
+        if protocol is Protocols.SSLv3:
+            return False
+
         return True
 
     @classmethod
     def supports_cipher(cls, cipher, with_curve=None):
-        if "openssl-1.0.2" in get_flag(S2N_PROVIDER_VERSION) and with_curve is not None:
-            invalid_ciphers = [
-                Ciphers.ECDHE_RSA_AES128_SHA,
-                Ciphers.ECDHE_RSA_AES256_SHA,
-                Ciphers.ECDHE_RSA_AES128_SHA256,
-                Ciphers.ECDHE_RSA_AES256_SHA384,
-                Ciphers.ECDHE_RSA_AES128_GCM_SHA256,
-                Ciphers.ECDHE_RSA_AES256_GCM_SHA384,
-            ]
-
-            # OpenSSL 1.0.2 and 1.0.2-FIPS can't find a shared cipher with S2N
-            # when P-384 is used, but I can't find any reason why.
-            if with_curve is Curves.P384 and cipher in invalid_ciphers:
-                return False
-
         return True
+
+    def _is_openssl_11(self) -> None:
+        result = subprocess.run(["openssl", "version"], shell=False, capture_output=True, text=True)
+        version_str = result.stdout.split(" ")
+        project = version_str[0]
+        version = version_str[1]
+        print(f"openssl version: {project} version: {version}")
+        if (project != "OpenSSL" or version[0:3] != "1.1"):
+            raise FileNotFoundError(f"Openssl version returned {version}, expected 1.1.x.")
 
     def setup_client(self):
         cmd_line = ['openssl', 's_client']
@@ -501,6 +519,8 @@ class OpenSSL(Provider):
             cmd_line.append('-tls1_1')
         elif self.options.protocol == Protocols.TLS10:
             cmd_line.append('-tls1')
+        elif self.options.protocol == Protocols.SSLv3:
+            cmd_line.append('-ssl3')
 
         if self.options.cipher is not None:
             cmd_line.extend(self._cipher_to_cmdline(self.options.cipher))
@@ -576,6 +596,8 @@ class OpenSSL(Provider):
             cmd_line.append('-tls1_1')
         elif self.options.protocol == Protocols.TLS10:
             cmd_line.append('-tls1')
+        elif self.options.protocol == Protocols.SSLv3:
+            cmd_line.append('-ssl3')
 
         if self.options.cipher is not None:
             cmd_line.extend(self._cipher_to_cmdline(self.options.cipher))
@@ -601,6 +623,26 @@ class OpenSSL(Provider):
         return cmd_line
 
 
+class SSLv3Provider(OpenSSL):
+    def __init__(self, options: ProviderOptions):
+        OpenSSL.__init__(self, options)
+        self._override_libssl(options)
+
+    def _override_libssl(self, options: ProviderOptions):
+        install_dir = os.environ["OPENSSL_1_0_2_INSTALL_DIR"]
+
+        override_env_vars = dict()
+        override_env_vars["PATH"] = install_dir + "/bin"
+        override_env_vars["LD_LIBRARY_PATH"] = install_dir + "/lib"
+        options.env_overrides = override_env_vars
+
+    @classmethod
+    def supports_protocol(cls, protocol, with_cert=None):
+        if protocol is Protocols.SSLv3:
+            return True
+        return False
+
+
 class JavaSSL(Provider):
     """
     NOTE: Only a Java SSL client has been set up. The server has not been
@@ -616,7 +658,8 @@ class JavaSSL(Provider):
 
     @classmethod
     def supports_protocol(cls, protocol, with_cert=None):
-        if protocol is Protocols.TLS10:
+        # https://aws.amazon.com/blogs/opensource/tls-1-0-1-1-changes-in-openjdk-and-amazon-corretto/
+        if protocol is Protocols.SSLv3 or protocol is Protocols.TLS10 or protocol is Protocols.TLS11:
             return False
 
         return True
@@ -670,7 +713,31 @@ class BoringSSL(Provider):
         return 'Cert issuer:'
 
     def setup_server(self):
-        pytest.skip('BoringSSL does not support server mode at this time')
+        cmd_line = ['bssl', 's_server']
+        cmd_line.extend(['-accept', self.options.port])
+        if self.options.cert is not None:
+            cmd_line.extend(['-cert', self.options.cert])
+        if self.options.key is not None:
+            cmd_line.extend(['-key', self.options.key])
+        if self.options.curve is not None:
+            if self.options.curve == Curves.P256:
+                cmd_line.extend(['-curves', 'P-256'])
+            elif self.options.curve == Curves.P384:
+                cmd_line.extend(['-curves', 'P-384'])
+            elif self.options.curve == Curves.P521:
+                cmd_line.extend(['-curves', 'P-521'])
+            elif self.options.curve == Curves.SecP256r1Kyber768Draft00:
+                cmd_line.extend(['-curves', 'SecP256r1Kyber768Draft00'])
+            elif self.options.curve == Curves.X25519Kyber768Draft00:
+                cmd_line.extend(['-curves', 'X25519Kyber768Draft00'])
+            elif self.options.curve == Curves.X25519:
+                pytest.skip('BoringSSL does not support curve {}'.format(
+                    self.options.curve))
+
+        if self.options.extra_flags is not None:
+            cmd_line.extend(self.options.extra_flags)
+
+        return cmd_line
 
     def setup_client(self):
         cmd_line = ['bssl', 's_client']
@@ -697,9 +764,16 @@ class BoringSSL(Provider):
                 cmd_line.extend(['-curves', 'P-384'])
             elif self.options.curve == Curves.P521:
                 cmd_line.extend(['-curves', 'P-521'])
+            elif self.options.curve == Curves.SecP256r1Kyber768Draft00:
+                cmd_line.extend(['-curves', 'SecP256r1Kyber768Draft00'])
+            elif self.options.curve == Curves.X25519Kyber768Draft00:
+                cmd_line.extend(['-curves', 'X25519Kyber768Draft00'])
             elif self.options.curve == Curves.X25519:
                 pytest.skip('BoringSSL does not support curve {}'.format(
                     self.options.curve))
+
+        if self.options.extra_flags is not None:
+            cmd_line.extend(self.options.extra_flags)
 
         # Clients are always ready to connect
         self.set_provider_ready()
@@ -750,6 +824,8 @@ class GnuTLS(Provider):
 
     @staticmethod
     def protocol_to_priority_str(protocol):
+        if not protocol:
+            return None
         return {
             Protocols.TLS10.value: "VERS-TLS1.0",
             Protocols.TLS11.value: "VERS-TLS1.1",

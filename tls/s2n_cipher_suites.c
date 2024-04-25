@@ -18,8 +18,8 @@
 
 #include "crypto/s2n_cipher.h"
 #include "crypto/s2n_openssl.h"
+#include "crypto/s2n_pq.h"
 #include "error/s2n_errno.h"
-#include "pq-crypto/s2n_pq.h"
 #include "tls/s2n_auth_selection.h"
 #include "tls/s2n_kex.h"
 #include "tls/s2n_psk.h"
@@ -698,7 +698,7 @@ struct s2n_cipher_suite s2n_tls13_aes_128_gcm_sha256 = {
     .available = 0,
     .name = "TLS_AES_128_GCM_SHA256",
     .iana_value = { TLS_AES_128_GCM_SHA256 },
-    .key_exchange_alg = NULL,
+    .key_exchange_alg = &s2n_tls13_kex,
     .auth_method = S2N_AUTHENTICATION_METHOD_TLS13,
     .record_alg = NULL,
     .all_record_algs = { &s2n_tls13_record_alg_aes128_gcm },
@@ -712,7 +712,7 @@ struct s2n_cipher_suite s2n_tls13_aes_256_gcm_sha384 = {
     .available = 0,
     .name = "TLS_AES_256_GCM_SHA384",
     .iana_value = { TLS_AES_256_GCM_SHA384 },
-    .key_exchange_alg = NULL,
+    .key_exchange_alg = &s2n_tls13_kex,
     .auth_method = S2N_AUTHENTICATION_METHOD_TLS13,
     .record_alg = NULL,
     .all_record_algs = { &s2n_tls13_record_alg_aes256_gcm },
@@ -726,7 +726,7 @@ struct s2n_cipher_suite s2n_tls13_chacha20_poly1305_sha256 = {
     .available = 0,
     .name = "TLS_CHACHA20_POLY1305_SHA256",
     .iana_value = { TLS_CHACHA20_POLY1305_SHA256 },
-    .key_exchange_alg = NULL,
+    .key_exchange_alg = &s2n_tls13_kex,
     .auth_method = S2N_AUTHENTICATION_METHOD_TLS13,
     .record_alg = NULL,
     .all_record_algs = { &s2n_tls13_record_alg_chacha20_poly1305 },
@@ -837,17 +837,18 @@ const struct s2n_cipher_preferences cipher_preferences_test_all_tls12 = {
  * in order of IANA value. Exposed for the "test_all_fips" cipher preference list.
  */
 static struct s2n_cipher_suite *s2n_all_fips_cipher_suites[] = {
-    &s2n_rsa_with_3des_ede_cbc_sha,           /* 0x00,0x0A */
-    &s2n_rsa_with_aes_128_cbc_sha,            /* 0x00,0x2F */
-    &s2n_rsa_with_aes_256_cbc_sha,            /* 0x00,0x35 */
-    &s2n_rsa_with_aes_128_cbc_sha256,         /* 0x00,0x3C */
-    &s2n_rsa_with_aes_256_cbc_sha256,         /* 0x00,0x3D */
+    &s2n_dhe_rsa_with_aes_128_cbc_sha,        /* 0x00,0x33 */
+    &s2n_dhe_rsa_with_aes_256_cbc_sha,        /* 0x00,0x39 */
     &s2n_dhe_rsa_with_aes_128_cbc_sha256,     /* 0x00,0x67 */
     &s2n_dhe_rsa_with_aes_256_cbc_sha256,     /* 0x00,0x6B */
-    &s2n_rsa_with_aes_128_gcm_sha256,         /* 0x00,0x9C */
-    &s2n_rsa_with_aes_256_gcm_sha384,         /* 0x00,0x9D */
     &s2n_dhe_rsa_with_aes_128_gcm_sha256,     /* 0x00,0x9E */
     &s2n_dhe_rsa_with_aes_256_gcm_sha384,     /* 0x00,0x9F */
+    &s2n_tls13_aes_128_gcm_sha256,            /* 0x13,0x01 */
+    &s2n_tls13_aes_256_gcm_sha384,            /* 0x13,0x02 */
+    &s2n_ecdhe_ecdsa_with_aes_128_cbc_sha,    /* 0xC0,0x09 */
+    &s2n_ecdhe_ecdsa_with_aes_256_cbc_sha,    /* 0xC0,0x0A */
+    &s2n_ecdhe_rsa_with_aes_128_cbc_sha,      /* 0xC0,0x13 */
+    &s2n_ecdhe_rsa_with_aes_256_cbc_sha,      /* 0xC0,0x14 */
     &s2n_ecdhe_ecdsa_with_aes_128_cbc_sha256, /* 0xC0,0x23 */
     &s2n_ecdhe_ecdsa_with_aes_256_cbc_sha384, /* 0xC0,0x24 */
     &s2n_ecdhe_rsa_with_aes_128_cbc_sha256,   /* 0xC0,0x27 */
@@ -1051,7 +1052,6 @@ S2N_RESULT s2n_cipher_suites_cleanup(void)
         * cleanup in later versions */
 #endif
     }
-
     return S2N_RESULT_OK;
 }
 
@@ -1089,7 +1089,7 @@ int s2n_set_cipher_as_client(struct s2n_connection *conn, uint8_t wire[S2N_TLS_C
     POSIX_ENSURE_REF(conn->secure);
     POSIX_ENSURE_REF(conn->secure->cipher_suite);
 
-    const struct s2n_security_policy *security_policy;
+    const struct s2n_security_policy *security_policy = NULL;
     POSIX_GUARD(s2n_connection_get_security_policy(conn, &security_policy));
     POSIX_ENSURE_REF(security_policy);
 
@@ -1173,7 +1173,7 @@ bool s2n_cipher_suite_uses_chacha20_alg(struct s2n_cipher_suite *cipher_suite)
     return cipher_suite && cipher_suite->record_alg && cipher_suite->record_alg->cipher == &s2n_chacha20_poly1305;
 }
 
-/* Iff the server has enabled allow_chacha20_boosting and the client has a chacha20 cipher suite as its most 
+/* Iff the server has enabled allow_chacha20_boosting and the client has a chacha20 cipher suite as its most
  * preferred cipher suite, then we have mutual chacha20 boosting support.
  */
 static S2N_RESULT s2n_validate_chacha20_boosting(const struct s2n_cipher_preferences *cipher_preferences, const uint8_t *wire,
@@ -1210,7 +1210,6 @@ static int s2n_set_cipher_as_server(struct s2n_connection *conn, uint8_t *wire, 
     if (conn->client_protocol_version < conn->server_protocol_version) {
         uint8_t fallback_scsv[S2N_TLS_CIPHER_SUITE_LEN] = { TLS_FALLBACK_SCSV };
         if (s2n_wire_ciphers_contain(fallback_scsv, wire, count, cipher_suite_len)) {
-            conn->closed = 1;
             POSIX_BAIL(S2N_ERR_FALLBACK_DETECTED);
         }
     }
@@ -1233,7 +1232,7 @@ static int s2n_set_cipher_as_server(struct s2n_connection *conn, uint8_t *wire, 
         conn->secure_renegotiation = 1;
     }
 
-    const struct s2n_security_policy *security_policy;
+    const struct s2n_security_policy *security_policy = NULL;
     POSIX_GUARD(s2n_connection_get_security_policy(conn, &security_policy));
 
     const struct s2n_cipher_preferences *cipher_preferences = security_policy->cipher_preferences;
@@ -1249,7 +1248,7 @@ static int s2n_set_cipher_as_server(struct s2n_connection *conn, uint8_t *wire, 
      * other cipher suites.
      *
      * If no mutually supported cipher suites are found, we choose one with a version
-     * too high for the current connection (higher_vers_match). 
+     * too high for the current connection (higher_vers_match).
      */
     for (size_t i = 0; i < cipher_preferences->count; i++) {
         const uint8_t *ours = cipher_preferences->suites[i]->iana_value;
@@ -1278,19 +1277,15 @@ static int s2n_set_cipher_as_server(struct s2n_connection *conn, uint8_t *wire, 
                 continue;
             }
 
-            /* TLS 1.3 does not include key exchange in cipher suites */
-            if (match->minimum_required_tls_version < S2N_TLS13) {
-                /* If the kex is not supported continue to the next candidate */
-                bool kex_supported = false;
-                POSIX_GUARD_RESULT(s2n_kex_supported(match, conn, &kex_supported));
-                if (!kex_supported) {
-                    continue;
-                }
-
-                /* If the kex is not configured correctly continue to the next candidate */
-                if (s2n_result_is_error(s2n_configure_kex(match, conn))) {
-                    continue;
-                }
+            /* If the kex is not supported continue to the next candidate */
+            bool kex_supported = false;
+            POSIX_GUARD_RESULT(s2n_kex_supported(match, conn, &kex_supported));
+            if (!kex_supported) {
+                continue;
+            }
+            /* If the kex is not configured correctly continue to the next candidate */
+            if (s2n_result_is_error(s2n_configure_kex(match, conn))) {
+                continue;
             }
 
             /**

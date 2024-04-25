@@ -52,7 +52,7 @@ typedef enum {
  * output of `s2n_client_hello_get_fingerprint_string`.
  * @returns S2N_SUCCESS on success, S2N_FAILURE on failure.
  */
-int s2n_client_hello_get_fingerprint_hash(struct s2n_client_hello *ch,
+S2N_API int s2n_client_hello_get_fingerprint_hash(struct s2n_client_hello *ch,
         s2n_fingerprint_type type, uint32_t max_hash_size,
         uint8_t *hash, uint32_t *hash_size, uint32_t *str_size);
 
@@ -71,6 +71,6 @@ int s2n_client_hello_get_fingerprint_hash(struct s2n_client_hello *ch,
  * @param output_size The actual size of the data written to `output`.
  * @returns S2N_SUCCESS on success, S2N_FAILURE on failure.
  */
-int s2n_client_hello_get_fingerprint_string(struct s2n_client_hello *ch,
+S2N_API int s2n_client_hello_get_fingerprint_string(struct s2n_client_hello *ch,
         s2n_fingerprint_type type, uint32_t max_size,
         uint8_t *output, uint32_t *output_size);
